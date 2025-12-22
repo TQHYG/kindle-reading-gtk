@@ -16,6 +16,9 @@
 static const char *LOG_DIR = "/mnt/us/extensions/kykky/log/";
 static const char *LOG_PREFIX = "metrics_reader_";
 
+static GdkColor black_color = {0, 0x0000, 0x0000, 0x0000};
+static GdkColor white_color = {0, 0xffff, 0xffff, 0xffff};
+
 // —— 统计结构 ——
 struct Stats {
     long total_seconds;
@@ -720,13 +723,26 @@ int main(int argc, char *argv[]) {
     gtk_notebook_set_tab_pos(GTK_NOTEBOOK(nb), GTK_POS_TOP);
     gtk_box_pack_start(GTK_BOX(vbox), nb, TRUE, TRUE, 0);
 
-    PangoFontDescription *tab_font = pango_font_description_from_string("Sans Bold 16");
+    gtk_widget_modify_bg(nb, GTK_STATE_NORMAL, &white_color);
 
-    int tab_index = 0;
+    PangoFontDescription *tab_font = pango_font_description_from_string("Sans Bold 16");
 
     auto add_tab = [&](GtkWidget *page, const char *name) {
         GtkWidget *tab = gtk_label_new(name);
         gtk_widget_modify_font(tab, tab_font);
+
+         // 设置非激活标签：白底黑字
+        gtk_widget_modify_bg(tab, GTK_STATE_NORMAL, &white_color);
+        gtk_widget_modify_fg(tab, GTK_STATE_NORMAL, &black_color);
+        gtk_widget_modify_bg(tab, GTK_STATE_PRELIGHT, &white_color);
+        gtk_widget_modify_fg(tab, GTK_STATE_PRELIGHT, &black_color);
+        
+        // 设置激活标签：黑底白字
+        gtk_widget_modify_bg(tab, GTK_STATE_ACTIVE, &black_color);
+        gtk_widget_modify_fg(tab, GTK_STATE_ACTIVE, &white_color);
+        gtk_widget_modify_bg(tab, GTK_STATE_SELECTED, &black_color);
+        gtk_widget_modify_fg(tab, GTK_STATE_SELECTED, &white_color);
+
         gtk_notebook_append_page(GTK_NOTEBOOK(nb), page, tab);
     };
 
