@@ -1,1 +1,1 @@
-option('kindle_root_dir', type : 'string', value: '/home/tqhyg/x-tools/arm-kindlepw2-linux-gnueabi/arm-kindlepw2-linux-gnueabi/sysroot', description: 'The path to the Kindle\'s mounted rootfs (for linking libraries)')
+option('kindle_root_dir', type : 'string', value: '~/x-tools/arm-kindlepw2-linux-gnueabi/arm-kindlepw2-linux-gnueabi/sysroot', description: 'The path to the Kindle\'s mounted rootfs (for linking libraries)')
