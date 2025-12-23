@@ -12,12 +12,23 @@
 #include <algorithm>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <unistd.h>
+#include <string>
 
-static const char *LOG_DIR = "/mnt/us/extensions/kykky/log/";
-static const char *LOG_PREFIX = "metrics_reader_";
+// —— 路径常量定义 ——
+// 基础路径
+static const std::string BASE_DIR = "/mnt/us/extensions/kykky/";
 
-static GdkColor black_color = {0, 0x0000, 0x0000, 0x0000};
-static GdkColor white_color = {0, 0xffff, 0xffff, 0xffff};
+// 派生路径
+static const std::string LOG_DIR = BASE_DIR + "log/";
+static const std::string ETC_ENABLE_FILE = BASE_DIR + "etc/enable";
+static const std::string SETUP_SCRIPT = BASE_DIR + "bin/metrics_setup.sh";
+static const std::string ARCHIVE_FILE = BASE_DIR + "log/history.gz";
+
+static const char *LOG_PREFIX = "metrics_reader_"; 
+static const char *TEMP_LOG_FILE = "/tmp/kykky_history.log";
+
+static GdkColor white = {0, 0xffff, 0xffff, 0xffff};
 
 // —— 统计结构 ——
 struct Stats {
@@ -87,10 +98,187 @@ static int days_in_month(int y, int m) {
     return d;
 }
 
-// —— 遍历读取 metrics_reader_* 文件 ——
+// —— 辅助函数：解析单行并更新 Stats ——
+static void parse_line_and_update(char *line, Stats &s, 
+                                  time_t today_start, time_t tomorrow_start,
+                                  time_t week_start, time_t week_end,
+                                  time_t cur_month_start, time_t cur_month_end,
+                                  time_t view_month_start, time_t view_month_end, int vdays) 
+{
+    char *saveptr = NULL;
+    char *token = strtok_r(line, ",", &saveptr);
+    int idx = 0;
+    long endt = 0;
+    long dur_ms = 0;
+    char type_field[256] = {0};
+
+    while (token) {
+        idx++;
+        if (idx == 2) endt = strtol(token, NULL, 10);
+        else if (idx == 6) strncpy(type_field, token, 255);
+        else if (idx == 7) dur_ms = strtol(token, NULL, 10);
+        token = strtok_r(NULL, ",", &saveptr);
+    }
+
+    if (strncmp(type_field, "com.lab126.booklet.reader.activeDuration", 40) != 0)
+        return;
+
+    long dur = dur_ms / 1000;
+    if (dur <= 0) return;
+
+    time_t end_time = (time_t)endt;
+    time_t start_time = end_time - dur;
+
+    s.total_seconds += dur;
+
+    // 以下逻辑与原代码完全一致，只是变量名略作调整适应参数
+    // 今日
+    if (end_time > today_start && start_time < tomorrow_start) {
+        time_t sclip = std::max(start_time, today_start);
+        time_t eclip = std::min(end_time, tomorrow_start);
+        if (eclip > sclip) s.today_seconds += (eclip - sclip);
+    }
+
+    // 本周
+    if (end_time > week_start && start_time < week_end) {
+        time_t sclip = std::max(start_time, week_start);
+        time_t eclip = std::min(end_time, week_end);
+        if (eclip > sclip) s.week_seconds += (eclip - sclip);
+    }
+
+    // 本月 (自然月)
+    if (end_time > cur_month_start && start_time < cur_month_end) {
+        time_t sclip = std::max(start_time, cur_month_start);
+        time_t eclip = std::min(end_time, cur_month_end);
+        if (eclip > sclip) s.month_seconds += (eclip - sclip);
+    }
+
+    // 今日分桶
+    if (end_time > today_start && start_time < tomorrow_start) {
+        time_t sclip = std::max(start_time, today_start);
+        time_t eclip = std::min(end_time, tomorrow_start);
+        time_t tcur = sclip;
+        while (tcur < eclip) {
+            int bi = (tcur - today_start) / (2 * 3600);
+            if (bi < 0) bi = 0;
+            if (bi > 11) bi = 11;
+            time_t bend = today_start + (bi + 1) * 2 * 3600;
+            if (bend > eclip) bend = eclip;
+            s.today_buckets[bi] += (bend - tcur);
+            tcur = bend;
+        }
+    }
+
+    // 本周每天
+    if (end_time > week_start && start_time < week_end) {
+        time_t sclip = std::max(start_time, week_start);
+        time_t eclip = std::min(end_time, week_end);
+        time_t tcur = sclip;
+        while (tcur < eclip) {
+            int di = (tcur - week_start) / (24 * 3600);
+            if (di < 0) di = 0;
+            if (di > 6) di = 6;
+            time_t dend = week_start + (di + 1) * 24 * 3600;
+            if (dend > eclip) dend = eclip;
+            s.week_days[di] += (dend - tcur);
+            tcur = dend;
+        }
+    }
+
+    // 视图月
+    if (end_time > view_month_start && start_time < view_month_end) {
+        time_t sclip = std::max(start_time, view_month_start);
+        time_t eclip = std::min(end_time, view_month_end);
+        time_t tcur = sclip;
+        while (tcur < eclip) {
+            int di = (tcur - view_month_start) / (24 * 3600);
+            if (di < 0) di = 0;
+            if (di >= vdays) di = vdays - 1;
+            time_t dend = view_month_start + (di + 1) * 24 * 3600;
+            if (dend > eclip) dend = eclip;
+            s.month_day_seconds[di] += (dend - tcur);
+            tcur = dend;
+        }
+    }
+}
+
+// —— 数据预处理 ——
+static void preprocess_data() {
+    // 1. 确定当月文件名后缀 (YYMM)
+    time_t now = time(NULL);
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+    char current_month_suffix[16];
+    // tm_year 是从1900起算的年数，% 100 得到 YY
+    snprintf(current_month_suffix, sizeof(current_month_suffix), "%02d%02d", 
+             (tmv.tm_year + 1900) % 100, tmv.tm_mon + 1);
+
+    char current_log_filename[128];
+    snprintf(current_log_filename, sizeof(current_log_filename), "%s%s", LOG_PREFIX, current_month_suffix);
+
+    // 2. 准备临时文件
+    // 如果存在 history.gz，解压覆盖到 TEMP；否则创建空文件
+    char cmd[512];
+    struct stat st;
+    if (stat(ARCHIVE_FILE.c_str(), &st) == 0) {
+        snprintf(cmd, sizeof(cmd), "gunzip -c %s > %s", ARCHIVE_FILE.c_str(), TEMP_LOG_FILE);
+        system(cmd);
+    } else {
+        // 创建空文件
+        FILE *fp = fopen(TEMP_LOG_FILE, "w");
+        if (fp) fclose(fp);
+    }
+
+    // 3. 扫描目录，追加旧日志
+    DIR *dir = opendir(LOG_DIR.c_str());
+    if (!dir) return;
+
+    FILE *fp_temp = fopen(TEMP_LOG_FILE, "a"); // 追加模式
+    if (!fp_temp) {
+        closedir(dir);
+        return;
+    }
+
+    struct dirent *ent;
+    bool has_updates = false;
+    char filepath[512];
+
+    while ((ent = readdir(dir)) != NULL) {
+        // 筛选 metrics_reader_ 开头
+        if (strncmp(ent->d_name, LOG_PREFIX, strlen(LOG_PREFIX)) != 0) continue;
+        
+        // 跳过当月日志
+        if (strcmp(ent->d_name, current_log_filename) == 0) continue;
+
+        // 处理旧日志
+        snprintf(filepath, sizeof(filepath), "%s%s", LOG_DIR.c_str(), ent->d_name);
+        
+        FILE *fp_old = fopen(filepath, "r");
+        if (fp_old) {
+            char buffer[1024];
+            while (fgets(buffer, sizeof(buffer), fp_old)) {
+                fputs(buffer, fp_temp);
+            }
+            fclose(fp_old);
+            unlink(filepath); // 删除旧文件
+            has_updates = true;
+        }
+    }
+    fclose(fp_temp);
+    closedir(dir);
+
+    // 4. 如果有追加操作，重新压缩归档 (保存到 LOG_DIR)
+    if (has_updates) {
+        snprintf(cmd, sizeof(cmd), "gzip -c %s > %s", TEMP_LOG_FILE, ARCHIVE_FILE.c_str());
+        system(cmd);
+    }
+}
+
+// —— 读取日志 ——
 static void read_logs_and_compute_stats(Stats &s, int view_year, int view_month) {
     memset(&s, 0, sizeof(Stats));
 
+    // --- 时间边界计算---
     time_t today_start, tomorrow_start;
     get_today_bounds(today_start, tomorrow_start);
 
@@ -118,123 +306,36 @@ static void read_logs_and_compute_stats(Stats &s, int view_year, int view_month)
 
     memset(s.today_buckets, 0, sizeof(s.today_buckets));
     memset(s.week_days, 0, sizeof(s.week_days));
+    // ------------------------------------
 
-    DIR *dir = opendir(LOG_DIR);
-    if (!dir) return;
 
-    struct dirent *ent;
-    char filepath[512];
-
-    while ((ent = readdir(dir)) != NULL) {
-        if (strncmp(ent->d_name, LOG_PREFIX, strlen(LOG_PREFIX)) != 0)
-            continue;
-
-        snprintf(filepath, sizeof(filepath), "%s%s", LOG_DIR, ent->d_name);
-        FILE *fp = fopen(filepath, "r");
-        if (!fp) continue;
-
+    auto process_file = [&](const char* fpath) {
+        FILE *fp = fopen(fpath, "r");
+        if (!fp) return;
         char line[512];
         while (fgets(line, sizeof(line), fp)) {
-            char *saveptr = NULL;
-            char *token = strtok_r(line, ",", &saveptr);
-            int idx = 0;
-            long endt = 0;
-            long dur_ms = 0;
-            char type_field[256] = {0};
-
-            while (token) {
-                idx++;
-                if (idx == 2) endt = strtol(token, NULL, 10);
-                else if (idx == 6) strncpy(type_field, token, 255);
-                else if (idx == 7) dur_ms = strtol(token, NULL, 10);
-                token = strtok_r(NULL, ",", &saveptr);
-            }
-
-            if (strncmp(type_field, "com.lab126.booklet.reader.activeDuration", 40) != 0)
-                continue;
-
-            long dur = dur_ms / 1000;
-            if (dur <= 0) continue;
-
-            time_t end_time = (time_t)endt;
-            time_t start_time = end_time - dur;
-
-            s.total_seconds += dur;
-
-            // 今日
-            if (end_time > today_start && start_time < tomorrow_start) {
-                time_t sclip = std::max(start_time, today_start);
-                time_t eclip = std::min(end_time, tomorrow_start);
-                if (eclip > sclip) s.today_seconds += (eclip - sclip);
-            }
-
-            // 本周
-            if (end_time > week_start && start_time < week_end) {
-                time_t sclip = std::max(start_time, week_start);
-                time_t eclip = std::min(end_time, week_end);
-                if (eclip > sclip) s.week_seconds += (eclip - sclip);
-            }
-
-            // 本月
-            if (end_time > cur_month_start && start_time < cur_month_end) {
-                time_t sclip = std::max(start_time, cur_month_start);
-                time_t eclip = std::min(end_time, cur_month_end);
-                if (eclip > sclip) s.month_seconds += (eclip - sclip);
-            }
-
-            // 今日分桶
-            if (end_time > today_start && start_time < tomorrow_start) {
-                time_t sclip = std::max(start_time, today_start);
-                time_t eclip = std::min(end_time, tomorrow_start);
-                time_t tcur = sclip;
-                while (tcur < eclip) {
-                    int bi = (tcur - today_start) / (2 * 3600);
-                    if (bi < 0) bi = 0;
-                    if (bi > 11) bi = 11;
-                    time_t bend = today_start + (bi + 1) * 2 * 3600;
-                    if (bend > eclip) bend = eclip;
-                    s.today_buckets[bi] += (bend - tcur);
-                    tcur = bend;
-                }
-            }
-
-            // 本周每天
-            if (end_time > week_start && start_time < week_end) {
-                time_t sclip = std::max(start_time, week_start);
-                time_t eclip = std::min(end_time, week_end);
-                time_t tcur = sclip;
-                while (tcur < eclip) {
-                    int di = (tcur - week_start) / (24 * 3600);
-                    if (di < 0) di = 0;
-                    if (di > 6) di = 6;
-                    time_t dend = week_start + (di + 1) * 24 * 3600;
-                    if (dend > eclip) dend = eclip;
-                    s.week_days[di] += (dend - tcur);
-                    tcur = dend;
-                }
-            }
-
-            // 月视图
-            if (end_time > view_month_start && start_time < view_month_end) {
-                time_t sclip = std::max(start_time, view_month_start);
-                time_t eclip = std::min(end_time, view_month_end);
-                time_t tcur = sclip;
-                while (tcur < eclip) {
-                    int di = (tcur - view_month_start) / (24 * 3600);
-                    if (di < 0) di = 0;
-                    if (di >= vdays) di = vdays - 1;
-                    time_t dend = view_month_start + (di + 1) * 24 * 3600;
-                    if (dend > eclip) dend = eclip;
-                    s.month_day_seconds[di] += (dend - tcur);
-                    tcur = dend;
-                }
-            }
+            parse_line_and_update(line, s, 
+                today_start, tomorrow_start,
+                week_start, week_end,
+                cur_month_start, cur_month_end,
+                view_month_start, view_month_end, vdays
+            );
         }
-
         fclose(fp);
-    }
+    };
 
-    closedir(dir);
+    // 1. 读取历史汇总 (临时文件)
+    process_file(TEMP_LOG_FILE);
+
+    // 2. 读取当月实时日志
+    time_t now = time(NULL);
+    struct tm now_tm;
+    localtime_r(&now, &now_tm);
+    char current_path[256];
+    snprintf(current_path, sizeof(current_path), "%s%s%02d%02d", 
+             LOG_DIR.c_str(), LOG_PREFIX, (now_tm.tm_year + 1900) % 100, now_tm.tm_mon + 1);
+    
+    process_file(current_path);
 }
 
 // —— 格式化时间 ——
@@ -515,7 +616,7 @@ static gboolean draw_month_view(GtkWidget *widget, GdkEventExpose *event, gpoint
         cairo_move_to(cr, x + 10, y + 50);
         cairo_show_text(cr, buf);
 
-        snprintf(buf, sizeof(buf), "%dH:%02dm", sec/3600, sec/60%60);
+        snprintf(buf, sizeof(buf), "%ldH:%02ldm", sec/3600, sec/60%60);
         cairo_set_font_size(cr, 32);
         cairo_move_to(cr, x + 10, y + 90);
         cairo_show_text(cr, buf);
@@ -612,7 +713,6 @@ static GtkWidget* create_month_page() {
 static GtkWidget* create_overview_page() {
     // 最外层白底
     GtkWidget *eventbox = gtk_event_box_new();
-    GdkColor white = {0, 0xffff, 0xffff, 0xffff};
     gtk_widget_modify_bg(eventbox, GTK_STATE_NORMAL, &white);
 
     // 居中用的对齐控件
@@ -664,17 +764,153 @@ static GtkWidget* create_overview_page() {
     return eventbox;
 }
 
+// —— 设置页辅助逻辑 ——
+
+static void style_button(GtkWidget *btn, const char *text) {
+    // 设置按钮文字
+    gtk_button_set_label(GTK_BUTTON(btn), text);
+    
+    // 设置按钮大小
+    gtk_widget_set_size_request(btn, 120, 70);
+}
+
+// 获取日志目录占用空间 (KiB)
+static long get_log_dir_size_kib() {
+    long total_bytes = 0;
+    DIR *d = opendir(LOG_DIR.c_str());
+    if (d) {
+        struct dirent *p;
+        while ((p = readdir(d))) {
+            if (p->d_name[0] == '.') continue;
+            std::string path = LOG_DIR + p->d_name;
+            struct stat st;
+            if (stat(path.c_str(), &st) == 0) {
+                total_bytes += st.st_size;
+            }
+        }
+        closedir(d);
+    }
+    return total_bytes / 1024;
+}
+
+// 检查是否启用了统计 (文件是否存在)
+static bool is_metrics_enabled() {
+    struct stat st;
+    return (stat(ETC_ENABLE_FILE.c_str(), &st) == 0);
+}
+
+// 开关回调
+
+static void on_toggle_enable_button(GtkButton *btn, gpointer data) {
+    // 获取当前按钮文字
+    const char *current = gtk_button_get_label(btn);
+    bool active = (strcmp(current, "已启用") == 0);
+    
+    // 切换状态
+    active = !active;
+    
+    // 执行命令
+    std::string cmd = SETUP_SCRIPT + (active ? " enable" : " disable");
+    system(cmd.c_str());
+    
+    // 更新按钮显示
+    gtk_button_set_label(btn, active ? "已启用" : "已停用");
+}
+
+// 清除数据回调 (需要传入 Label 指针以更新显示的占用空间)
+static void on_reset_data(GtkButton *btn, gpointer user_data) {
+    GtkWidget *size_label = GTK_WIDGET(user_data);
+    
+    std::string cmd = SETUP_SCRIPT + " reset";
+    system(cmd.c_str());
+
+    // 清除后更新界面显示为 0 KiB
+    gtk_label_set_text(GTK_LABEL(size_label), "0 KiB");
+    
+    // 同时清空内存中的统计数据，避免用户切回概览页看到旧数据
+    memset(&g_stats, 0, sizeof(Stats));
+}
+
+static GtkWidget* create_settings_page() {
+    // 使用 VBox 垂直排列三行
+    GtkWidget *vbox = gtk_vbox_new(FALSE, 20); // 间距 20
+    GtkWidget *align_box = gtk_alignment_new(0.5, 0.1, 0.8, 0); // 居中靠上，宽度占80%
+    gtk_container_add(GTK_CONTAINER(align_box), vbox);
+
+    // 统一字体设置
+    PangoFontDescription *row_font = pango_font_description_from_string("Sans 18");
+
+    // --- 第一行：启用统计功能 ---
+    GtkWidget *hbox1 = gtk_hbox_new(FALSE, 10);
+    GtkWidget *lbl_enable = gtk_label_new("启用阅读统计");
+    gtk_widget_modify_font(lbl_enable, row_font);
+    
+    // 使用按钮模拟开关
+    GtkWidget *btn_enable = gtk_button_new();
+    bool enabled = is_metrics_enabled();
+    style_button(btn_enable, enabled ? "已启用" : "已停用");
+    g_signal_connect(G_OBJECT(btn_enable), "clicked", 
+                     G_CALLBACK(on_toggle_enable_button), NULL);
+
+    // 布局第一行: Label 靠左，按钮靠右
+    gtk_box_pack_start(GTK_BOX(hbox1), lbl_enable, FALSE, FALSE, 0);
+    gtk_box_pack_end(GTK_BOX(hbox1), btn_enable, FALSE, FALSE, 0);
+
+
+    // --- 第三行：占用空间 (先创建它，因为清除按钮需要更新它) ---
+    GtkWidget *hbox3 = gtk_hbox_new(FALSE, 10);
+    GtkWidget *lbl_size_title = gtk_label_new("统计数据已占用");
+    gtk_widget_modify_font(lbl_size_title, row_font);
+
+    char size_buf[64];
+    snprintf(size_buf, sizeof(size_buf), "%ld KiB", get_log_dir_size_kib());
+    GtkWidget *lbl_size_val = gtk_label_new(size_buf);
+    gtk_widget_modify_font(lbl_size_val, row_font);
+
+    gtk_box_pack_start(GTK_BOX(hbox3), lbl_size_title, FALSE, FALSE, 0);
+    gtk_box_pack_end(GTK_BOX(hbox3), lbl_size_val, FALSE, FALSE, 0);
+
+
+    // --- 第二行：清除统计数据 ---
+    GtkWidget *hbox2 = gtk_hbox_new(FALSE, 10);
+    GtkWidget *lbl_clear = gtk_label_new("清除统计数据");
+    gtk_widget_modify_font(lbl_clear, row_font);
+
+    GtkWidget *btn_clear = gtk_button_new_with_label("清除");
+    style_button(btn_clear, "清除");
+    // 传入 lbl_size_val 指针，以便清除后更新数字
+    g_signal_connect(G_OBJECT(btn_clear), "clicked", G_CALLBACK(on_reset_data), lbl_size_val);
+
+    gtk_box_pack_start(GTK_BOX(hbox2), lbl_clear, FALSE, FALSE, 0);
+    gtk_box_pack_end(GTK_BOX(hbox2), btn_clear, FALSE, FALSE, 0);
+
+
+    // --- 将三行加入 VBox ---
+    gtk_box_pack_start(GTK_BOX(vbox), hbox1, FALSE, FALSE, 10);
+    GtkWidget *hsep1 = gtk_hseparator_new(); // 分割线
+    gtk_box_pack_start(GTK_BOX(vbox), hsep1, FALSE, FALSE, 10);
+
+    gtk_box_pack_start(GTK_BOX(vbox), hbox2, FALSE, FALSE, 10);
+    GtkWidget *hsep2 = gtk_hseparator_new(); // 分割线
+    gtk_box_pack_start(GTK_BOX(vbox), hsep2, FALSE, FALSE, 10);
+
+    gtk_box_pack_start(GTK_BOX(vbox), hbox3, FALSE, FALSE, 10);
+
+    pango_font_description_free(row_font);
+    
+    return align_box;
+}
+
 
 
 // —— 退出页 ——
 static GtkWidget* create_exit_page() {
     // 创建一个标签，背景设为白色
     GtkWidget *label = gtk_label_new("正在退出...");
-    GdkColor white = {0, 0xffff, 0xffff, 0xffff};
     gtk_widget_modify_bg(label, GTK_STATE_NORMAL, &white);
     
     // 设置字体大小
-    PangoFontDescription *font = pango_font_description_from_string("Sans 30");
+    PangoFontDescription *font = pango_font_description_from_string("Sans 22");
     gtk_widget_modify_font(label, font);
     pango_font_description_free(font);
     
@@ -685,7 +921,7 @@ static void on_notebook_switch_page(GtkNotebook *notebook,
                                     GtkWidget *page, 
                                     guint page_num, 
                                     gpointer user_data) {
-    gint n_pages = gtk_notebook_get_n_pages(notebook);
+    guint n_pages = gtk_notebook_get_n_pages(notebook);
     if (page_num == n_pages - 1) {
         gtk_main_quit();
     }
@@ -695,6 +931,40 @@ static void on_notebook_switch_page(GtkNotebook *notebook,
 int main(int argc, char *argv[]) {
     gtk_init(&argc, &argv);
 
+    // 1. 初始化窗口和主容器
+    GtkWidget *win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_title(GTK_WINDOW(win),
+        "L:A_N:application_PC:T_ID:net.tqhyg.reading");
+    gtk_window_set_default_size(GTK_WINDOW(win), 1072, 1200);
+
+    g_signal_connect(G_OBJECT(win), "destroy", G_CALLBACK(gtk_main_quit), NULL);
+
+    gtk_widget_modify_bg(win, GTK_STATE_NORMAL, &white);
+
+    GtkWidget *vbox = gtk_vbox_new(FALSE, 0);
+    gtk_container_add(GTK_CONTAINER(win), vbox);
+
+    gtk_widget_modify_bg(vbox, GTK_STATE_NORMAL, &white);
+
+    // 2. 创建等待界面 (居中的 Label)
+    GtkWidget *align = gtk_alignment_new(0.5, 0.5, 0, 0);
+    GtkWidget *wait_label = gtk_label_new("正在处理数据...");
+    PangoFontDescription *wait_font = pango_font_description_from_string("Sans 22");
+    gtk_widget_modify_font(wait_label, wait_font);
+    pango_font_description_free(wait_font);
+
+    gtk_container_add(GTK_CONTAINER(align), wait_label);
+    gtk_box_pack_start(GTK_BOX(vbox), align, TRUE, TRUE, 0);
+
+    gtk_widget_show_all(win);
+
+    // 强制 UI 渲染等待界面
+    while (gtk_events_pending()) gtk_main_iteration();
+    usleep(800000); //让用户觉得程序在干活
+
+    // 3. 执行耗时的预处理和数据收集
+    preprocess_data();
+
     time_t now = time(NULL);
     struct tm tmv;
     localtime_r(&now, &tmv);
@@ -703,54 +973,34 @@ int main(int argc, char *argv[]) {
 
     read_logs_and_compute_stats(g_stats, g_view_year, g_view_month);
 
-    GtkWidget *win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(win),
-        "L:A_N:application_PC:T_ID:net.tqhyg.reading");
-    gtk_window_set_default_size(GTK_WINDOW(win), 1024, 758);
-
-    g_signal_connect(G_OBJECT(win), "destroy", G_CALLBACK(gtk_main_quit), NULL);
-
-    GdkColor white = {0, 0xffff, 0xffff, 0xffff};
-    gtk_widget_modify_bg(win, GTK_STATE_NORMAL, &white);
-
-    GtkWidget *vbox = gtk_vbox_new(FALSE, 0);
-    gtk_container_add(GTK_CONTAINER(win), vbox);
-    
-    GdkColor white2 = {0, 0xffff, 0xffff, 0xffff};
-    gtk_widget_modify_bg(vbox, GTK_STATE_NORMAL, &white2);
+    // 5. 销毁等待界面并切换到正式内容
+    gtk_widget_destroy(align); 
 
     GtkWidget *nb = gtk_notebook_new();
     gtk_notebook_set_tab_pos(GTK_NOTEBOOK(nb), GTK_POS_TOP);
     gtk_box_pack_start(GTK_BOX(vbox), nb, TRUE, TRUE, 0);
 
-    gtk_widget_modify_bg(nb, GTK_STATE_NORMAL, &white_color);
+    gtk_widget_modify_bg(nb, GTK_STATE_NORMAL, &white);
 
-    PangoFontDescription *tab_font = pango_font_description_from_string("Sans Bold 16");
+    PangoFontDescription *tab_font = pango_font_description_from_string("Sans Bold 15");
 
     auto add_tab = [&](GtkWidget *page, const char *name) {
         GtkWidget *tab = gtk_label_new(name);
         gtk_widget_modify_font(tab, tab_font);
 
-         // 设置非激活标签：白底黑字
-        gtk_widget_modify_bg(tab, GTK_STATE_NORMAL, &white_color);
-        gtk_widget_modify_fg(tab, GTK_STATE_NORMAL, &black_color);
-        gtk_widget_modify_bg(tab, GTK_STATE_PRELIGHT, &white_color);
-        gtk_widget_modify_fg(tab, GTK_STATE_PRELIGHT, &black_color);
-        
-        // 设置激活标签：黑底白字
-        gtk_widget_modify_bg(tab, GTK_STATE_ACTIVE, &black_color);
-        gtk_widget_modify_fg(tab, GTK_STATE_ACTIVE, &white_color);
-        gtk_widget_modify_bg(tab, GTK_STATE_SELECTED, &black_color);
-        gtk_widget_modify_fg(tab, GTK_STATE_SELECTED, &white_color);
+        if (strcmp(name, " X ") != 0) {
+            gtk_widget_modify_fg(tab, GTK_STATE_ACTIVE, &white);
+        }
 
         gtk_notebook_append_page(GTK_NOTEBOOK(nb), page, tab);
     };
 
     add_tab(create_overview_page(), "概览");
     add_tab(create_today_page(), "今日分布");
-    add_tab(create_week_page(), "本周分布");
-    add_tab(create_month_page(), "月视图");
-    add_tab(create_exit_page(), "退出");
+    add_tab(create_week_page(), "周分布");
+    add_tab(create_month_page(), "阅读日历");
+    add_tab(create_settings_page(), "设置");
+    add_tab(create_exit_page(), " X ");
 
     pango_font_description_free(tab_font);
 
@@ -758,5 +1008,8 @@ int main(int argc, char *argv[]) {
 
     gtk_widget_show_all(win);
     gtk_main();
+
+    // --- 清理临时文件 ---
+    unlink(TEMP_LOG_FILE);
     return 0;
 }
