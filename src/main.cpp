@@ -771,7 +771,7 @@ static void style_button(GtkWidget *btn, const char *text) {
     gtk_button_set_label(GTK_BUTTON(btn), text);
     
     // 设置按钮大小
-    gtk_widget_set_size_request(btn, 120, 70);
+    gtk_widget_set_size_request(btn, 150, 75);
 }
 
 // 获取日志目录占用空间 (KiB)
@@ -821,14 +821,74 @@ static void on_toggle_enable_button(GtkButton *btn, gpointer data) {
 static void on_reset_data(GtkButton *btn, gpointer user_data) {
     GtkWidget *size_label = GTK_WIDGET(user_data);
     
-    std::string cmd = SETUP_SCRIPT + " reset";
-    system(cmd.c_str());
-
-    // 清除后更新界面显示为 0 KiB
-    gtk_label_set_text(GTK_LABEL(size_label), "0 KiB");
+    // 创建确认对话框
+    GtkWidget *dialog = gtk_dialog_new();
+    gtk_window_set_title(GTK_WINDOW(dialog),
+        "L:D_N:dialog_PC:T_ID:net.tqhyg.reading.dialog");
+    //gtk_window_set_default_size(GTK_WINDOW(dialog), 600, 300);
+    gtk_container_set_border_width(GTK_CONTAINER(dialog), 20);
     
-    // 同时清空内存中的统计数据，避免用户切回概览页看到旧数据
-    memset(&g_stats, 0, sizeof(Stats));
+    // 设置对话框为模态
+    gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
+    
+    // 设置对话框背景色
+    GdkColor white = {0, 0xffff, 0xffff, 0xffff};
+    gtk_widget_modify_bg(dialog, GTK_STATE_NORMAL, &white);
+    
+    // 创建对话框内容区域
+    GtkWidget *content_area = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+    
+    // 创建消息标签
+    GtkWidget *label = gtk_label_new("! 警告 !\n\n确定要清除所有统计数据吗？\n此操作不可撤销！\n");
+    PangoFontDescription *font = pango_font_description_from_string("Sans 16");
+    gtk_widget_modify_font(label, font);
+    pango_font_description_free(font);
+    
+    // 设置标签对齐
+    gtk_label_set_justify(GTK_LABEL(label), GTK_JUSTIFY_CENTER);
+    gtk_misc_set_alignment(GTK_MISC(label), 0.5, 0.5);
+    
+    // 添加标签到内容区域
+    gtk_box_pack_start(GTK_BOX(content_area), label, TRUE, TRUE, 20);
+    
+    // 添加按钮
+    GtkWidget *btn_yes = gtk_button_new_with_label("确定");
+    GtkWidget *btn_no = gtk_button_new_with_label("取消");
+    
+    // 设置按钮样式
+    gtk_widget_set_size_request(btn_yes, 120, 80);
+    gtk_widget_set_size_request(btn_no, 120, 80);
+    
+    // 添加按钮到对话框动作区域
+    GtkWidget *action_area = gtk_dialog_get_action_area(GTK_DIALOG(dialog));
+    gtk_box_pack_start(GTK_BOX(action_area), btn_yes, FALSE, FALSE, 10);
+    gtk_box_pack_start(GTK_BOX(action_area), btn_no, FALSE, FALSE, 10);
+    
+    // 显示所有控件
+    gtk_widget_show_all(dialog);
+    
+    // 连接按钮信号
+    gtk_dialog_add_action_widget(GTK_DIALOG(dialog), btn_yes, GTK_RESPONSE_YES);
+    gtk_dialog_add_action_widget(GTK_DIALOG(dialog), btn_no, GTK_RESPONSE_NO);
+    
+    // 运行对话框
+    gint response = gtk_dialog_run(GTK_DIALOG(dialog));
+    
+    // 处理响应
+    if (response == GTK_RESPONSE_YES) {
+        // 用户确认清除数据
+        std::string cmd = SETUP_SCRIPT + " reset";
+        system(cmd.c_str());
+        
+        // 更新界面显示为 0 KiB
+        gtk_label_set_text(GTK_LABEL(size_label), "0 KiB");
+        
+        // 清空内存中的统计数据
+        memset(&g_stats, 0, sizeof(Stats));
+    }
+    
+    // 销毁对话框
+    gtk_widget_destroy(dialog);
 }
 
 static GtkWidget* create_settings_page() {
