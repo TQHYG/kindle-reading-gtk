@@ -536,6 +536,22 @@ typedef struct {
     GtkWidget *label_title;
 } MonthViewWidgets;
 
+// 将比例值（0.0-1.0）映射到16阶灰度值（0.0-1.0）
+// ratio=0.0 → 灰度=1.0（白色）
+// ratio=1.0 → 灰度=0.0（黑色）
+static double get_gray_level_16(double ratio) {
+    if (ratio <= 0.0) return 1.0; // 完全白色
+    if (ratio >= 1.0) return 0.0; // 完全黑色
+    
+    // 将0-1的比例映射到0-15的阶梯
+    int level = (int)(ratio * 15.99); // 0-15
+    if (level < 0) level = 0;
+    if (level > 15) level = 15;
+    
+    // 转换为灰度值：level=0→白(1.0), level=15→黑(0.0)
+    return 1.0 - (level / 15.0);
+}
+
 static gboolean draw_month_view(GtkWidget *widget, GdkEventExpose *event, gpointer data) {
     cairo_t *cr = gdk_cairo_create(gtk_widget_get_window(widget));
 
@@ -583,6 +599,14 @@ static gboolean draw_month_view(GtkWidget *widget, GdkEventExpose *event, gpoint
     int wday = tmv.tm_wday;
     int first_col = (wday == 0 ? 6 : wday - 1);
 
+    // 找出本月阅读时间最长的一天作为基准
+    long max_seconds = 1; // 避免除零
+    for (int i = 0; i < days; i++) {
+        if (g_stats.month_day_seconds[i] > max_seconds) {
+            max_seconds = g_stats.month_day_seconds[i];
+        }
+    }
+
     for (int d = 1; d <= days; d++) {
         int idx = d - 1;
         int off = first_col + idx;
@@ -593,22 +617,37 @@ static gboolean draw_month_view(GtkWidget *widget, GdkEventExpose *event, gpoint
         double y = top + r * ch;
 
         long sec = g_stats.month_day_seconds[idx];
-        bool dark = (sec >= 30 * 60);
-
-        if (dark) {
-            cairo_set_source_rgb(cr, 0, 0, 0);
-            cairo_rectangle(cr, x, y, cw, ch);
-            cairo_fill(cr);
-            cairo_set_source_rgb(cr, 1, 1, 1);
+        
+        // 计算该天相对于最大值的比例
+        double ratio = (double)sec / (double)max_seconds;
+        
+        // 获取对应的16阶灰度值（0.0=黑，1.0=白）
+        double gray = get_gray_level_16(ratio);
+        
+        // 设置背景色（灰度值）
+        cairo_set_source_rgb(cr, gray, gray, gray);
+        cairo_rectangle(cr, x, y, cw, ch);
+        cairo_fill(cr);
+        
+        // 根据背景灰度决定文字颜色
+        // 灰度 < 0.5（较暗）用白字，>= 0.5（较亮）用黑字
+        if (gray < 0.5) {
+            cairo_set_source_rgb(cr, 1, 1, 1); // 白字
         } else {
-            cairo_set_source_rgb(cr, 1, 1, 1);
-            cairo_rectangle(cr, x, y, cw, ch);
-            cairo_fill(cr);
-            cairo_set_source_rgb(cr, 0, 0, 0);
+            cairo_set_source_rgb(cr, 0, 0, 0); // 黑字
         }
-
+        
+        // 绘制边框（黑色）
+        cairo_set_source_rgb(cr, 0, 0, 0);
         cairo_rectangle(cr, x, y, cw, ch);
         cairo_stroke(cr);
+        
+        // 恢复文字颜色
+        if (gray < 0.5) {
+            cairo_set_source_rgb(cr, 1, 1, 1);
+        } else {
+            cairo_set_source_rgb(cr, 0, 0, 0);
+        }
 
         char buf[32];
         snprintf(buf, sizeof(buf), "%d", d);
