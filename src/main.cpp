@@ -366,7 +366,7 @@ static gboolean draw_today_dist(GtkWidget *widget, GdkEventExpose *event, gpoint
     cairo_line_to(cr, w - right, h - bottom);
     cairo_stroke(cr);
 
-    long maxv = 1;
+    long maxv = 3600;
     for (int i = 0; i < 12; i++)
         if (g_stats.today_buckets[i] > maxv) maxv = g_stats.today_buckets[i];
 
@@ -458,7 +458,7 @@ static gboolean draw_week_dist(GtkWidget *widget, GdkEventExpose *event, gpointe
     cairo_line_to(cr, w - right, h - bottom);
     cairo_stroke(cr);
 
-    long maxv = 1;
+    long maxv = 7200;
     for (int i = 0; i < 7; i++)
         if (g_stats.week_days[i] > maxv) maxv = g_stats.week_days[i];
 
@@ -543,10 +543,11 @@ static double get_gray_level_16(double ratio) {
     if (ratio <= 0.0) return 1.0; // 完全白色
     if (ratio >= 1.0) return 0.0; // 完全黑色
     
-    // 将0-1的比例映射到0-15的阶梯
-    int level = (int)(ratio * 15.99); // 0-15
+    // 将0-1的比例映射到8-15的阶梯
+    int level = (int)(ratio * 7.99); // 0-15
     if (level < 0) level = 0;
-    if (level > 15) level = 15;
+    if (level > 7) level = 7;
+    level += 8;
     
     // 转换为灰度值：level=0→白(1.0), level=15→黑(0.0)
     return 1.0 - (level / 15.0);
@@ -600,7 +601,8 @@ static gboolean draw_month_view(GtkWidget *widget, GdkEventExpose *event, gpoint
     int first_col = (wday == 0 ? 6 : wday - 1);
 
     // 找出本月阅读时间最长的一天作为基准
-    long max_seconds = 1; // 避免除零
+    long basic_sec = 1800; // 最小基准值
+    long max_seconds = 1800; //默认最长值
     for (int i = 0; i < days; i++) {
         if (g_stats.month_day_seconds[i] > max_seconds) {
             max_seconds = g_stats.month_day_seconds[i];
@@ -619,7 +621,10 @@ static gboolean draw_month_view(GtkWidget *widget, GdkEventExpose *event, gpoint
         long sec = g_stats.month_day_seconds[idx];
         
         // 计算该天相对于最大值的比例
-        double ratio = (double)sec / (double)max_seconds;
+        double ratio = 0.0;
+        if ( (double)sec > (double)basic_sec ) {
+            ratio = (double)sec / (double)max_seconds;
+        }
         
         // 获取对应的16阶灰度值（0.0=黑，1.0=白）
         double gray = get_gray_level_16(ratio);
