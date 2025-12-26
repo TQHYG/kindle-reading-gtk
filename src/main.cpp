@@ -14,6 +14,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <string>
+#include <map>
+#include <algorithm>
 
 // —— 路径常量定义 ——
 // 基础路径
@@ -24,9 +26,15 @@ static const std::string LOG_DIR = BASE_DIR + "log/";
 static const std::string ETC_ENABLE_FILE = BASE_DIR + "etc/enable";
 static const std::string SETUP_SCRIPT = BASE_DIR + "bin/metrics_setup.sh";
 static const std::string ARCHIVE_FILE = BASE_DIR + "log/history.gz";
+static const std::string CONFIG_FILE = BASE_DIR + "etc/config.ini";
 
 static const char *LOG_PREFIX = "metrics_reader_"; 
 static const char *TEMP_LOG_FILE = "/tmp/kykky_history.log";
+
+static const int DEFAULT_TARGET_MINUTES = 30;
+static const int MIN_TARGET_MINUTES = 10;
+static const int MAX_TARGET_MINUTES = 180;
+static int g_daily_target_minutes = DEFAULT_TARGET_MINUTES;
 
 static GdkColor white = {0, 0xffff, 0xffff, 0xffff};
 
@@ -43,6 +51,12 @@ struct Stats {
     std::vector<long> month_day_seconds;
     int month_year;
     int month_month;
+
+    // 全量历史记录：Key=当日0点时间戳, Value=当日阅读秒数
+    std::map<time_t, long> history_map;
+
+    // 标记数据是否已加载
+    bool loaded;
 };
 
 static Stats g_stats;
@@ -98,12 +112,41 @@ static int days_in_month(int y, int m) {
     return d;
 }
 
+// —— 配置管理 ——
+static void save_target_config() {
+    // 确保目录存在
+    std::string dir = CONFIG_FILE.substr(0, CONFIG_FILE.find_last_of('/'));
+    mkdir(dir.c_str(), 0755);
+    
+    FILE *fp = fopen(CONFIG_FILE.c_str(), "w");
+    if (fp) {
+        fprintf(fp, "daily_target_minutes=%d\n", g_daily_target_minutes);
+        fclose(fp);
+    }
+}
+
+static void load_target_config() {
+    FILE *fp = fopen(CONFIG_FILE.c_str(), "r");
+    if (fp) {
+        int value = DEFAULT_TARGET_MINUTES;
+        if (fscanf(fp, "daily_target_minutes=%d", &value) == 1) {
+            if (value >= MIN_TARGET_MINUTES && value <= MAX_TARGET_MINUTES) {
+                g_daily_target_minutes = value;
+            }
+        }
+        fclose(fp);
+    } else {
+        // 文件不存在，创建默认配置
+        save_target_config();
+    }
+}
+
+
 // —— 辅助函数：解析单行并更新 Stats ——
 static void parse_line_and_update(char *line, Stats &s, 
                                   time_t today_start, time_t tomorrow_start,
                                   time_t week_start, time_t week_end,
-                                  time_t cur_month_start, time_t cur_month_end,
-                                  time_t view_month_start, time_t view_month_end, int vdays) 
+                                  time_t cur_month_start, time_t cur_month_end) 
 {
     char *saveptr = NULL;
     char *token = strtok_r(line, ",", &saveptr);
@@ -131,36 +174,33 @@ static void parse_line_and_update(char *line, Stats &s,
 
     s.total_seconds += dur;
 
-    // 以下逻辑与原代码完全一致，只是变量名略作调整适应参数
-    // 今日
+    // 1. 更新今日/本周/本月 总数 (保持原有逻辑，用于概览页快速显示)
     if (end_time > today_start && start_time < tomorrow_start) {
         time_t sclip = std::max(start_time, today_start);
         time_t eclip = std::min(end_time, tomorrow_start);
         if (eclip > sclip) s.today_seconds += (eclip - sclip);
     }
 
-    // 本周
     if (end_time > week_start && start_time < week_end) {
         time_t sclip = std::max(start_time, week_start);
         time_t eclip = std::min(end_time, week_end);
         if (eclip > sclip) s.week_seconds += (eclip - sclip);
     }
 
-    // 本月 (自然月)
     if (end_time > cur_month_start && start_time < cur_month_end) {
         time_t sclip = std::max(start_time, cur_month_start);
         time_t eclip = std::min(end_time, cur_month_end);
         if (eclip > sclip) s.month_seconds += (eclip - sclip);
     }
 
-    // 今日分桶
+    // 2. 今日分桶 (保持不变)
     if (end_time > today_start && start_time < tomorrow_start) {
         time_t sclip = std::max(start_time, today_start);
         time_t eclip = std::min(end_time, tomorrow_start);
         time_t tcur = sclip;
         while (tcur < eclip) {
             int bi = (tcur - today_start) / (2 * 3600);
-            if (bi < 0) bi = 0;
+            if (bi < 0) bi = 0; 
             if (bi > 11) bi = 11;
             time_t bend = today_start + (bi + 1) * 2 * 3600;
             if (bend > eclip) bend = eclip;
@@ -169,14 +209,14 @@ static void parse_line_and_update(char *line, Stats &s,
         }
     }
 
-    // 本周每天
+    // 3. 本周分天 (保持不变)
     if (end_time > week_start && start_time < week_end) {
         time_t sclip = std::max(start_time, week_start);
         time_t eclip = std::min(end_time, week_end);
         time_t tcur = sclip;
         while (tcur < eclip) {
             int di = (tcur - week_start) / (24 * 3600);
-            if (di < 0) di = 0;
+            if (di < 0) di = 0; 
             if (di > 6) di = 6;
             time_t dend = week_start + (di + 1) * 24 * 3600;
             if (dend > eclip) dend = eclip;
@@ -185,21 +225,22 @@ static void parse_line_and_update(char *line, Stats &s,
         }
     }
 
-    // 视图月
-    if (end_time > view_month_start && start_time < view_month_end) {
-        time_t sclip = std::max(start_time, view_month_start);
-        time_t eclip = std::min(end_time, view_month_end);
-        time_t tcur = sclip;
-        while (tcur < eclip) {
-            int di = (tcur - view_month_start) / (24 * 3600);
-            if (di < 0) di = 0;
-            if (di >= vdays) di = vdays - 1;
-            time_t dend = view_month_start + (di + 1) * 24 * 3600;
-            if (dend > eclip) dend = eclip;
-            s.month_day_seconds[di] += (dend - tcur);
-            tcur = dend;
+    // 更新全历史每日统计
+    time_t t_cursor = start_time;
+    while (t_cursor < end_time) {
+        time_t day_start_ts = get_day_start(t_cursor);
+        time_t next_day_ts = day_start_ts + 24 * 3600;
+        
+        time_t clip_end = std::min(end_time, next_day_ts);
+        
+        // 累加时长到对应日期
+        if (clip_end > t_cursor) {
+            s.history_map[day_start_ts] += (clip_end - t_cursor);
         }
+        
+        t_cursor = clip_end;
     }
+
 }
 
 // —— 数据预处理 ——
@@ -274,68 +315,93 @@ static void preprocess_data() {
     }
 }
 
-// —— 读取日志 ——
-static void read_logs_and_compute_stats(Stats &s, int view_year, int view_month) {
-    memset(&s, 0, sizeof(Stats));
+// —— 读取日志与计算 ——
+// 参数说明：
+// force_reload: true=重新读取磁盘文件; false=仅重新生成月视图数据(用于翻页)
+static void read_logs_and_compute_stats(Stats &s, int view_year, int view_month, bool force_reload) {
+    
+    // 1. 初始化/清理 (解决 memset 问题)
+    // 只有在强制重载时，才清空所有核心数据
+    if (force_reload || !s.loaded) {
+        s.total_seconds = 0;
+        s.today_seconds = 0;
+        s.week_seconds = 0;
+        s.month_seconds = 0;
+        
+        // 使用 std::fill 初始化数组，安全且标准
+        std::fill(std::begin(s.today_buckets), std::end(s.today_buckets), 0);
+        std::fill(std::begin(s.week_days), std::end(s.week_days), 0);
+        
+        // 清空 Map
+        s.history_map.clear();
+        s.loaded = true;
 
-    // --- 时间边界计算---
-    time_t today_start, tomorrow_start;
-    get_today_bounds(today_start, tomorrow_start);
+        // --- 准备时间边界 (用于 parse_line 里的判断) ---
+        time_t today_start, tomorrow_start;
+        get_today_bounds(today_start, tomorrow_start);
 
-    time_t week_start;
-    get_week_start(week_start);
-    time_t week_end = week_start + 7 * 24 * 3600;
+        time_t week_start;
+        get_week_start(week_start);
+        time_t week_end = week_start + 7 * 24 * 3600;
 
-    time_t cur_month_start;
-    int cur_year, cur_month;
-    get_month_start(cur_month_start, cur_year, cur_month);
-    time_t cur_month_end = cur_month_start + days_in_month(cur_year, cur_month) * 24 * 3600;
+        time_t cur_month_start;
+        int cur_year, cur_month;
+        get_month_start(cur_month_start, cur_year, cur_month);
+        time_t cur_month_end = cur_month_start + days_in_month(cur_year, cur_month) * 24 * 3600;
 
+        // --- 读取文件 Lambda ---
+        auto process_file = [&](const char* fpath) {
+            FILE *fp = fopen(fpath, "r");
+            if (!fp) return;
+            char line[512];
+            while (fgets(line, sizeof(line), fp)) {
+                // 调用简化后的解析函数
+                parse_line_and_update(line, s, 
+                    today_start, tomorrow_start,
+                    week_start, week_end,
+                    cur_month_start, cur_month_end
+                );
+            }
+            fclose(fp);
+        };
+
+        // 读取历史汇总
+        process_file(TEMP_LOG_FILE);
+
+        // 读取当月实时日志
+        time_t now = time(NULL);
+        struct tm now_tm;
+        localtime_r(&now, &now_tm);
+        char current_path[256];
+        snprintf(current_path, sizeof(current_path), "%s%s%02d%02d", 
+                 LOG_DIR.c_str(), LOG_PREFIX, (now_tm.tm_year + 1900) % 100, now_tm.tm_mon + 1);
+        process_file(current_path);
+    }
+
+    // 2. 生成视图数据 (优化部分)
+    // 无论是否重读文件，都根据 view_year/view_month 从 map 中提取数据
     s.month_year = view_year;
     s.month_month = view_month;
-    int vdays = days_in_month(view_year, view_month);
-    s.month_day_seconds.assign(vdays, 0);
 
+    int vdays = days_in_month(view_year, view_month);
+    s.month_day_seconds.assign(vdays, 0); // 重置并调整大小
+
+    // 构造该月每一天的时间戳，去 Map 里查
     struct tm tmv;
     memset(&tmv, 0, sizeof(tmv));
     tmv.tm_year = view_year - 1900;
     tmv.tm_mon = view_month - 1;
-    tmv.tm_mday = 1;
-    time_t view_month_start = mktime(&tmv);
-    time_t view_month_end = view_month_start + vdays * 24 * 3600;
+    tmv.tm_hour = 0; tmv.tm_min = 0; tmv.tm_sec = 0;
 
-    memset(s.today_buckets, 0, sizeof(s.today_buckets));
-    memset(s.week_days, 0, sizeof(s.week_days));
-    // ------------------------------------
-
-
-    auto process_file = [&](const char* fpath) {
-        FILE *fp = fopen(fpath, "r");
-        if (!fp) return;
-        char line[512];
-        while (fgets(line, sizeof(line), fp)) {
-            parse_line_and_update(line, s, 
-                today_start, tomorrow_start,
-                week_start, week_end,
-                cur_month_start, cur_month_end,
-                view_month_start, view_month_end, vdays
-            );
+    for (int d = 1; d <= vdays; d++) {
+        tmv.tm_mday = d;
+        time_t day_ts = mktime(&tmv); // 获取该日0点时间戳
+        
+        // 如果 Map 里有记录，就填入 vector
+        if (s.history_map.count(day_ts)) {
+            s.month_day_seconds[d - 1] = s.history_map[day_ts];
         }
-        fclose(fp);
-    };
-
-    // 1. 读取历史汇总 (临时文件)
-    process_file(TEMP_LOG_FILE);
-
-    // 2. 读取当月实时日志
-    time_t now = time(NULL);
-    struct tm now_tm;
-    localtime_r(&now, &now_tm);
-    char current_path[256];
-    snprintf(current_path, sizeof(current_path), "%s%s%02d%02d", 
-             LOG_DIR.c_str(), LOG_PREFIX, (now_tm.tm_year + 1900) % 100, now_tm.tm_mon + 1);
-    
-    process_file(current_path);
+    }
 }
 
 // —— 格式化时间 ——
@@ -601,8 +667,8 @@ static gboolean draw_month_view(GtkWidget *widget, GdkEventExpose *event, gpoint
     int first_col = (wday == 0 ? 6 : wday - 1);
 
     // 找出本月阅读时间最长的一天作为基准
-    long basic_sec = 1800; // 最小基准值
-    long max_seconds = 1800; //默认最长值
+    long basic_sec = g_daily_target_minutes * 60; // 最小基准值
+    long max_seconds = g_daily_target_minutes * 60; //默认最长值
     for (int i = 0; i < days; i++) {
         if (g_stats.month_day_seconds[i] > max_seconds) {
             max_seconds = g_stats.month_day_seconds[i];
@@ -698,7 +764,8 @@ static void month_prev(GtkButton *b, gpointer data) {
         g_view_month = 12;
         g_view_year--;
     }
-    read_logs_and_compute_stats(g_stats, g_view_year, g_view_month);
+    // [优化] 只查 Map
+    read_logs_and_compute_stats(g_stats, g_view_year, g_view_month, false);
     update_month_title(mv);
     gtk_widget_queue_draw(mv->drawing_area);
 }
@@ -710,7 +777,7 @@ static void month_next(GtkButton *b, gpointer data) {
         g_view_month = 1;
         g_view_year++;
     }
-    read_logs_and_compute_stats(g_stats, g_view_year, g_view_month);
+    read_logs_and_compute_stats(g_stats, g_view_year, g_view_month, false);
     update_month_title(mv);
     gtk_widget_queue_draw(mv->drawing_area);
 }
@@ -766,6 +833,73 @@ static GtkWidget* create_overview_page() {
     GtkWidget *vbox = gtk_vbox_new(FALSE, 20);
     gtk_container_add(GTK_CONTAINER(align), vbox);
 
+    bool today_target_met = g_stats.today_seconds >= (g_daily_target_minutes * 60);
+    char target_status[128];
+    
+    if (today_target_met) {
+        snprintf(target_status, sizeof(target_status), "今天的阅读目标已完成！");
+    } else {
+        long remaining = (g_daily_target_minutes * 60) - g_stats.today_seconds;
+        snprintf(target_status, sizeof(target_status), "还差 %ld 分钟达成今日阅读目标！", 
+                 remaining/60 + (remaining%60 > 0 ? 1 : 0));
+    }
+
+    // 计算连续达成天数
+    int consecutive_days = 0;
+    long target_sec = g_daily_target_minutes * 60;
+    time_t now = time(NULL);
+    time_t loop_day = get_day_start(now);
+    
+    // 如果今天已经达标，从今天开始算；如果今天还没达标，从昨天开始算
+    if (g_stats.history_map[loop_day] < target_sec) {
+        loop_day -= 24 * 3600; // 回退到昨天
+    }
+
+    // 向前回溯统计
+    while (true) {
+        // 查找该日期是否有记录且达标
+        if (g_stats.history_map.count(loop_day) && g_stats.history_map[loop_day] >= target_sec) {
+            consecutive_days++;
+            loop_day -= 24 * 3600; // 前一天
+        } else {
+            break; // 中断
+        }
+    }
+
+    //计算本月达成天数
+    int month_target_days = 0;
+    time_t m_start;
+    int m_year, m_mon;
+    get_month_start(m_start, m_year, m_mon); // 获取本月1号0点
+    
+    int days_in_cur_month = days_in_month(m_year, m_mon);
+    time_t m_end_bound = m_start + days_in_cur_month * 24 * 3600;
+
+    // 遍历本月每一天
+    for (time_t d = m_start; d < m_end_bound; d += 24 * 3600) {
+        if (d > now) break; // 未来的日子不算
+        if (g_stats.history_map.count(d) && g_stats.history_map[d] >= target_sec) {
+            month_target_days++;
+        }
+    }
+    
+    char consecutive_str[64];
+    char month_target_str[64];
+    snprintf(consecutive_str, sizeof(consecutive_str), "连续达成目标 %d 天", consecutive_days);
+    snprintf(month_target_str, sizeof(month_target_str), "本月目标达成 %d 天", month_target_days);
+
+    // 创建标签
+    GtkWidget *label_target_status = gtk_label_new(target_status);
+    GtkWidget *label_consecutive = gtk_label_new(consecutive_str);
+    GtkWidget *label_month_target = gtk_label_new(month_target_str);
+    
+    // 设置字体大小
+    PangoFontDescription *font_small = pango_font_description_from_string("Sans 16");
+    gtk_widget_modify_font(label_target_status, font_small);
+    gtk_widget_modify_font(label_consecutive, font_small);
+    gtk_widget_modify_font(label_month_target, font_small);
+
+
     char buf_today[64], buf_total[64];
     format_hms(g_stats.today_seconds, buf_today, sizeof(buf_today));
     format_hms(g_stats.total_seconds, buf_total, sizeof(buf_total));
@@ -778,13 +912,13 @@ static GtkWidget* create_overview_page() {
     GtkWidget *label_total_title = gtk_label_new("总计阅读");
     GtkWidget *label_total_time  = gtk_label_new(buf_total);
 
-    // 标题字体稍大
+    // 标题字体
     PangoFontDescription *font_title = pango_font_description_from_string("Sans 22");
     gtk_widget_modify_font(label_today_title, font_title);
     gtk_widget_modify_font(label_total_title, font_title);
     pango_font_description_free(font_title);
 
-    // 时间字体更大
+    // 时间字体
     PangoFontDescription *font_time = pango_font_description_from_string("Sans 32");
     gtk_widget_modify_font(label_today_time, font_time);
     gtk_widget_modify_font(label_total_time, font_time);
@@ -799,11 +933,31 @@ static GtkWidget* create_overview_page() {
     gtk_misc_set_alignment(GTK_MISC(label_today_time),  0.5, 0.5);
     gtk_misc_set_alignment(GTK_MISC(label_total_title), 0.5, 0.5);
     gtk_misc_set_alignment(GTK_MISC(label_total_time),  0.5, 0.5);
+    gtk_label_set_justify(GTK_LABEL(label_target_status), GTK_JUSTIFY_CENTER);
+    gtk_label_set_justify(GTK_LABEL(label_consecutive), GTK_JUSTIFY_CENTER);
+    gtk_label_set_justify(GTK_LABEL(label_month_target), GTK_JUSTIFY_CENTER);
+    gtk_misc_set_alignment(GTK_MISC(label_target_status), 0.5, 0.5);
+    gtk_misc_set_alignment(GTK_MISC(label_consecutive), 0.5, 0.5);
+    gtk_misc_set_alignment(GTK_MISC(label_month_target), 0.5, 0.5);
+
+    // 添加到vbox
+    gtk_box_pack_start(GTK_BOX(vbox), label_target_status, FALSE, FALSE, 5);
+    
+    GtkWidget *sep1 = gtk_hseparator_new();
+    gtk_box_pack_start(GTK_BOX(vbox), sep1, FALSE, FALSE, 16);
 
     gtk_box_pack_start(GTK_BOX(vbox), label_today_title, FALSE, FALSE, 5);
     gtk_box_pack_start(GTK_BOX(vbox), label_today_time,  FALSE, FALSE, 5);
     gtk_box_pack_start(GTK_BOX(vbox), label_total_title, FALSE, FALSE, 20);
     gtk_box_pack_start(GTK_BOX(vbox), label_total_time,  FALSE, FALSE, 5);
+    
+    GtkWidget *sep2 = gtk_hseparator_new();
+    gtk_box_pack_start(GTK_BOX(vbox), sep2, FALSE, FALSE, 16);
+
+    gtk_box_pack_start(GTK_BOX(vbox), label_consecutive, FALSE, FALSE, 10);
+    gtk_box_pack_start(GTK_BOX(vbox), label_month_target, FALSE, FALSE, 5);
+
+    pango_font_description_free(font_small);
 
     return eventbox;
 }
@@ -927,12 +1081,33 @@ static void on_reset_data(GtkButton *btn, gpointer user_data) {
         // 更新界面显示为 0 KiB
         gtk_label_set_text(GTK_LABEL(size_label), "0 KiB");
         
-        // 清空内存中的统计数据
-        memset(&g_stats, 0, sizeof(Stats));
+        // 安全清理
+        read_logs_and_compute_stats(g_stats, g_view_year, g_view_month, true);
     }
     
     // 销毁对话框
     gtk_widget_destroy(dialog);
+}
+
+// 设置目标函数
+static void on_target_change(GtkButton *btn, gpointer data) {
+    int change = GPOINTER_TO_INT(data);
+    int new_target = g_daily_target_minutes + change;
+    
+    // 限制范围
+    if (new_target < MIN_TARGET_MINUTES) new_target = MIN_TARGET_MINUTES;
+    if (new_target > MAX_TARGET_MINUTES) new_target = MAX_TARGET_MINUTES;
+    
+    if (new_target != g_daily_target_minutes) {
+        g_daily_target_minutes = new_target;
+        save_target_config();
+        
+        // 更新显示
+        GtkWidget *label = GTK_WIDGET(g_object_get_data(G_OBJECT(btn), "target_label"));
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%d 分钟", g_daily_target_minutes);
+        gtk_label_set_text(GTK_LABEL(label), buf);
+    }
 }
 
 static GtkWidget* create_settings_page() {
@@ -942,9 +1117,53 @@ static GtkWidget* create_settings_page() {
     gtk_container_add(GTK_CONTAINER(align_box), vbox);
 
     // 统一字体设置
-    PangoFontDescription *row_font = pango_font_description_from_string("Sans 18");
+    PangoFontDescription *row_font = pango_font_description_from_string("Sans 14");
 
-    // --- 第一行：启用统计功能 ---
+    // --- 第一行：每日阅读目标 ---
+    GtkWidget *hbox_target = gtk_hbox_new(FALSE, 10);
+    GtkWidget *lbl_target = gtk_label_new("每日阅读目标");
+    gtk_widget_modify_font(lbl_target, row_font);
+    
+    // 创建控制按钮
+    GtkWidget *btn_minus10 = gtk_button_new_with_label("-10");
+    GtkWidget *btn_minus1 = gtk_button_new_with_label("-1");
+    GtkWidget *label_target_val = gtk_label_new("");
+    GtkWidget *btn_plus1 = gtk_button_new_with_label("+1");
+    GtkWidget *btn_plus10 = gtk_button_new_with_label("+10");
+    
+    // 设置按钮大小
+    gtk_widget_set_size_request(btn_minus10, 80, 50);
+    gtk_widget_set_size_request(btn_minus1, 80, 50);
+    gtk_widget_set_size_request(btn_plus1, 80, 50);
+    gtk_widget_set_size_request(btn_plus10, 80, 50);
+    
+    // 更新标签显示
+    char target_buf[32];
+    snprintf(target_buf, sizeof(target_buf), "%d 分钟", g_daily_target_minutes);
+    gtk_label_set_text(GTK_LABEL(label_target_val), target_buf);
+    gtk_widget_modify_font(label_target_val, row_font);
+    
+    // 连接信号
+    g_signal_connect(G_OBJECT(btn_minus10), "clicked", G_CALLBACK(on_target_change), GINT_TO_POINTER(-10));
+    g_signal_connect(G_OBJECT(btn_minus1), "clicked", G_CALLBACK(on_target_change), GINT_TO_POINTER(-1));
+    g_signal_connect(G_OBJECT(btn_plus1), "clicked", G_CALLBACK(on_target_change), GINT_TO_POINTER(1));
+    g_signal_connect(G_OBJECT(btn_plus10), "clicked", G_CALLBACK(on_target_change), GINT_TO_POINTER(10));
+    
+    // 存储标签指针以便更新
+    g_object_set_data(G_OBJECT(btn_minus10), "target_label", label_target_val);
+    g_object_set_data(G_OBJECT(btn_minus1), "target_label", label_target_val);
+    g_object_set_data(G_OBJECT(btn_plus1), "target_label", label_target_val);
+    g_object_set_data(G_OBJECT(btn_plus10), "target_label", label_target_val);
+    
+    // 布局
+    gtk_box_pack_start(GTK_BOX(hbox_target), lbl_target, FALSE, FALSE, 0);
+    gtk_box_pack_end(GTK_BOX(hbox_target), btn_plus10, FALSE, FALSE, 5);
+    gtk_box_pack_end(GTK_BOX(hbox_target), btn_plus1, FALSE, FALSE, 5);
+    gtk_box_pack_end(GTK_BOX(hbox_target), label_target_val, FALSE, FALSE, 15);
+    gtk_box_pack_end(GTK_BOX(hbox_target), btn_minus1, FALSE, FALSE, 5);
+    gtk_box_pack_end(GTK_BOX(hbox_target), btn_minus10, FALSE, FALSE, 5);
+
+    // --- 第二行：启用统计功能 ---
     GtkWidget *hbox1 = gtk_hbox_new(FALSE, 10);
     GtkWidget *lbl_enable = gtk_label_new("启用阅读统计");
     gtk_widget_modify_font(lbl_enable, row_font);
@@ -956,12 +1175,12 @@ static GtkWidget* create_settings_page() {
     g_signal_connect(G_OBJECT(btn_enable), "clicked", 
                      G_CALLBACK(on_toggle_enable_button), NULL);
 
-    // 布局第一行: Label 靠左，按钮靠右
+    // 布局第二行: Label 靠左，按钮靠右
     gtk_box_pack_start(GTK_BOX(hbox1), lbl_enable, FALSE, FALSE, 0);
     gtk_box_pack_end(GTK_BOX(hbox1), btn_enable, FALSE, FALSE, 0);
 
 
-    // --- 第三行：占用空间 (先创建它，因为清除按钮需要更新它) ---
+    // --- 第四行：占用空间---
     GtkWidget *hbox3 = gtk_hbox_new(FALSE, 10);
     GtkWidget *lbl_size_title = gtk_label_new("统计数据已占用");
     gtk_widget_modify_font(lbl_size_title, row_font);
@@ -975,7 +1194,7 @@ static GtkWidget* create_settings_page() {
     gtk_box_pack_end(GTK_BOX(hbox3), lbl_size_val, FALSE, FALSE, 0);
 
 
-    // --- 第二行：清除统计数据 ---
+    // --- 第三行：清除统计数据 ---
     GtkWidget *hbox2 = gtk_hbox_new(FALSE, 10);
     GtkWidget *lbl_clear = gtk_label_new("清除统计数据");
     gtk_widget_modify_font(lbl_clear, row_font);
@@ -989,7 +1208,11 @@ static GtkWidget* create_settings_page() {
     gtk_box_pack_end(GTK_BOX(hbox2), btn_clear, FALSE, FALSE, 0);
 
 
-    // --- 将三行加入 VBox ---
+    // --- 将所有行加入 VBox ---
+    gtk_box_pack_start(GTK_BOX(vbox), hbox_target, FALSE, FALSE, 10);
+    GtkWidget *hsep_target = gtk_hseparator_new();
+    gtk_box_pack_start(GTK_BOX(vbox), hsep_target, FALSE, FALSE, 10);
+
     gtk_box_pack_start(GTK_BOX(vbox), hbox1, FALSE, FALSE, 10);
     GtkWidget *hsep1 = gtk_hseparator_new(); // 分割线
     gtk_box_pack_start(GTK_BOX(vbox), hsep1, FALSE, FALSE, 10);
@@ -1069,13 +1292,15 @@ int main(int argc, char *argv[]) {
     // 3. 执行耗时的预处理和数据收集
     preprocess_data();
 
+    load_target_config(); 
+
     time_t now = time(NULL);
     struct tm tmv;
     localtime_r(&now, &tmv);
     g_view_year = tmv.tm_year + 1900;
     g_view_month = tmv.tm_mon + 1;
 
-    read_logs_and_compute_stats(g_stats, g_view_year, g_view_month);
+    read_logs_and_compute_stats(g_stats, g_view_year, g_view_month, true);
 
     // 5. 销毁等待界面并切换到正式内容
     gtk_widget_destroy(align); 
