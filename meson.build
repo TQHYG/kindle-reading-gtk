@@ -7,11 +7,13 @@ gtk_dep = dependency('gtk+-2.0')
 # Project definition
 ###
 sources = files(
-    './src/main.cpp'
+    './src/main.cpp',
+    './thirdparty/qrcodegen/cpp/qrcodegen.cpp'
 )
 
 include_dirs = include_directories(
-  './src/include/'
+  './src/include/',
+  './thirdparty/qrcodegen/cpp/'
 )
 
 executable('kindle-reading-gtk', sources, include_directories: include_dirs, dependencies: [gtk_dep], cpp_args: '-static-libstdc++', link_args: '-static-libstdc++')
