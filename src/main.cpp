@@ -446,9 +446,9 @@ static void read_logs_and_compute_stats(Stats &s, int view_year, int view_month,
 static std::string generate_share_url() {
     std::string url = "https://" + g_share_domain + "/share.php?";
     
-    // 添加年月
+    // 添加年月和目标
     char buf[64];
-    snprintf(buf, sizeof(buf), "year=%d&month=%d", g_view_year, g_view_month);
+    snprintf(buf, sizeof(buf), "year=%d&month=%d&goal=%d", g_view_year, g_view_month, g_daily_target_minutes);
     url += buf;
     
     // 添加当月每日数据
