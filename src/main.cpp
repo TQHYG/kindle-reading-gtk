@@ -130,36 +130,54 @@ static void save_target_config() {
 }
 
 static void load_target_config() {
+    // 首先设置默认值
+    g_daily_target_minutes = DEFAULT_TARGET_MINUTES;
+    g_share_domain = "reading.tqhyg.net";
+    
     FILE *fp = fopen(CONFIG_FILE.c_str(), "r");
-    if (fp) {
-        int value = DEFAULT_TARGET_MINUTES;
-        char domain_buf[256] = {0};
+    if (!fp) {
+        // 文件不存在，创建默认配置
+        save_target_config();
+        return;
+    }
+    
+    // 一次读取解析所有配置项
+    char line[512];
+    bool has_target = false;
+    bool has_domain = false;
+    
+    while (fgets(line, sizeof(line), fp)) {
+        // 移除换行符
+        size_t len = strlen(line);
+        if (len > 0 && line[len-1] == '\n') {
+            line[len-1] = '\0';
+        }
         
-        if (fscanf(fp, "daily_target_minutes=%d", &value) == 1) {
+        // 解析每日目标分钟数
+        if (strncmp(line, "daily_target_minutes=", 21) == 0) {
+            int value = atoi(line + 21);
             if (value >= MIN_TARGET_MINUTES && value <= MAX_TARGET_MINUTES) {
                 g_daily_target_minutes = value;
             }
+            has_target = true;
         }
-        
-        // 读取分享域名
-        rewind(fp); // 重新读取文件
-        while (fgets(domain_buf, sizeof(domain_buf), fp)) {
-            if (strncmp(domain_buf, "share_domain=", 13) == 0) {
-                char domain[256];
-                if (sscanf(domain_buf, "share_domain=%255[^\n]", domain) == 1) {
-                    g_share_domain = domain;
-                }
-                break;
+        // 解析分享域名
+        else if (strncmp(line, "share_domain=", 13) == 0) {
+            std::string domain = line + 13;
+            if (!domain.empty()) {
+                g_share_domain = domain;
             }
+            has_domain = true;
         }
-        
-        fclose(fp);
-    } else {
-        // 文件不存在，创建默认配置
+    }
+    
+    fclose(fp);
+    
+    // 如果配置项缺失，补全配置
+    if (!has_target || !has_domain) {
         save_target_config();
     }
 }
-
 
 
 // —— 辅助函数：解析单行并更新 Stats ——
@@ -340,7 +358,7 @@ static void preprocess_data() {
 // force_reload: true=重新读取磁盘文件; false=仅重新生成月视图数据(用于翻页)
 static void read_logs_and_compute_stats(Stats &s, int view_year, int view_month, bool force_reload) {
     
-    // 1. 初始化/清理 (解决 memset 问题)
+    // 1. 初始化/清理
     // 只有在强制重载时，才清空所有核心数据
     if (force_reload || !s.loaded) {
         s.total_seconds = 0;
@@ -404,7 +422,7 @@ static void read_logs_and_compute_stats(Stats &s, int view_year, int view_month,
     s.month_month = view_month;
 
     int vdays = days_in_month(view_year, view_month);
-    s.month_day_seconds.assign(vdays, 0); // 重置并调整大小
+    s.month_day_seconds.assign(vdays, 0);
 
     // 构造该月每一天的时间戳，去 Map 里查
     struct tm tmv;
