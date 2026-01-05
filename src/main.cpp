@@ -852,7 +852,7 @@ static gboolean draw_month_view(GtkWidget *widget, GdkEventExpose *event, gpoint
 
     cairo_set_source_rgb(cr, 0, 0, 0);
     cairo_set_font_size(cr, 50);
-    cairo_move_to(cr, left, h - 40); 
+    cairo_move_to(cr, left + 360, h - 40); 
     cairo_show_text(cr, month_title);
 
     cairo_destroy(cr);
