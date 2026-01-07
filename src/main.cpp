@@ -48,21 +48,26 @@ struct Stats {
     long week_seconds;
     long month_seconds;
 
-    long today_buckets[12]; // 每 2 小时
+    long view_daily_seconds;      // 当前查看日期的总秒数
+    long view_daily_buckets[12];  // 当前查看日期的分布桶
+
     long week_days[7];      // 周一到周日
 
     std::vector<long> month_day_seconds;
     int month_year;
     int month_month;
 
-    // 全量历史记录：Key=当日0点时间戳, Value=当日阅读秒数
+    // 每日总秒数map
     std::map<time_t, long> history_map;
+    // 每日分桶详情map
+    std::map<time_t, std::vector<long>> daily_detail_map;
 
     // 标记数据是否已加载
     bool loaded;
 };
 
 static Stats g_stats;
+static time_t g_view_daily_ts;
 static int g_view_year;
 static int g_view_month;
 
@@ -231,20 +236,44 @@ static void parse_line_and_update(char *line, Stats &s,
         if (eclip > sclip) s.month_seconds += (eclip - sclip);
     }
 
-    // 2. 今日分桶 (保持不变)
-    if (end_time > today_start && start_time < tomorrow_start) {
-        time_t sclip = std::max(start_time, today_start);
-        time_t eclip = std::min(end_time, tomorrow_start);
-        time_t tcur = sclip;
-        while (tcur < eclip) {
-            int bi = (tcur - today_start) / (2 * 3600);
+    // 2. 通用分桶逻辑：将这段阅读时间分配到对应的日期Map中
+    time_t t_cursor = start_time;
+    while (t_cursor < end_time) {
+        // 获取当前游标所在的自然日 0点
+        time_t day_start = get_day_start(t_cursor);
+        time_t day_end = day_start + 24 * 3600;
+        
+        // 当前处理片段在这一天内的结束时间
+        time_t seg_end = std::min(end_time, day_end);
+        
+        // 如果跨天，确保 Map 中该天的 vector 已初始化
+        if (s.daily_detail_map[day_start].empty()) {
+            s.daily_detail_map[day_start].resize(12, 0);
+        }
+        
+        // 每日总数 Map 更新
+        s.history_map[day_start] += (seg_end - t_cursor);
+
+        // 处理当天的分桶 (2小时一桶)
+        time_t bucket_cursor = t_cursor;
+        while (bucket_cursor < seg_end) {
+            int bi = (bucket_cursor - day_start) / 7200;
             if (bi < 0) bi = 0; 
             if (bi > 11) bi = 11;
-            time_t bend = today_start + (bi + 1) * 2 * 3600;
-            if (bend > eclip) bend = eclip;
-            s.today_buckets[bi] += (bend - tcur);
-            tcur = bend;
+            
+            time_t bucket_end_time = day_start + (bi + 1) * 7200;
+            // 桶结束时间不能超过当前片段结束时间
+            if (bucket_end_time > seg_end) bucket_end_time = seg_end;
+            
+            long step_sec = bucket_end_time - bucket_cursor;
+            if (step_sec > 0) {
+                s.daily_detail_map[day_start][bi] += step_sec;
+            }
+            
+            bucket_cursor = bucket_end_time;
         }
+
+        t_cursor = seg_end; // 继续处理下一天（如果跨天阅读）
     }
 
     // 3. 本周分天 (保持不变)
@@ -264,7 +293,7 @@ static void parse_line_and_update(char *line, Stats &s,
     }
 
     // 更新全历史每日统计
-    time_t t_cursor = start_time;
+    t_cursor = start_time;
     while (t_cursor < end_time) {
         time_t day_start_ts = get_day_start(t_cursor);
         time_t next_day_ts = day_start_ts + 24 * 3600;
@@ -353,6 +382,24 @@ static void preprocess_data() {
     }
 }
 
+// 从内存 Map 中提取指定日期的数据到 view_daily_buckets
+static void refresh_daily_view_data(Stats &s, time_t target_day_ts) {
+    // 1. 重置当前视图数据
+    std::fill(std::begin(s.view_daily_buckets), std::end(s.view_daily_buckets), 0);
+    s.view_daily_seconds = 0;
+
+    // 2. 查找 Map
+    if (s.daily_detail_map.count(target_day_ts)) {
+        const std::vector<long> &vec = s.daily_detail_map[target_day_ts];
+        if (vec.size() >= 12) {
+            for (int i = 0; i < 12; i++) {
+                s.view_daily_buckets[i] = vec[i];
+                s.view_daily_seconds += vec[i];
+            }
+        }
+    }
+}
+
 // —— 读取日志与计算 ——
 // 参数说明：
 // force_reload: true=重新读取磁盘文件; false=仅重新生成月视图数据(用于翻页)
@@ -365,13 +412,15 @@ static void read_logs_and_compute_stats(Stats &s, int view_year, int view_month,
         s.today_seconds = 0;
         s.week_seconds = 0;
         s.month_seconds = 0;
+        s.view_daily_seconds = 0;
         
         // 使用 std::fill 初始化数组，安全且标准
-        std::fill(std::begin(s.today_buckets), std::end(s.today_buckets), 0);
+        std::fill(std::begin(s.view_daily_buckets), std::end(s.view_daily_buckets), 0);
         std::fill(std::begin(s.week_days), std::end(s.week_days), 0);
         
         // 清空 Map
         s.history_map.clear();
+        s.daily_detail_map.clear();
         s.loaded = true;
 
         // --- 准备时间边界 (用于 parse_line 里的判断) ---
@@ -416,7 +465,11 @@ static void read_logs_and_compute_stats(Stats &s, int view_year, int view_month,
         process_file(current_path);
     }
 
-    // 2. 生成视图数据 (优化部分)
+    // 2. 生成视图数据
+
+    // 无论是否重读了文件，都根据全局的查看日期刷新一下分桶数据
+    refresh_daily_view_data(s, g_view_daily_ts);
+
     // 无论是否重读文件，都根据 view_year/view_month 从 map 中提取数据
     s.month_year = view_year;
     s.month_month = view_month;
@@ -459,9 +512,9 @@ static std::string generate_share_url() {
         url += buf;
     }
     
-    // 添加今日分时数据（d1-d12）
+    // 添加分时数据（d1-d12）
     for (int i = 0; i < 12; i++) {
-        long minutes = (g_stats.today_buckets[i] + 59) / 60;
+        long minutes = (g_stats.view_daily_buckets[i] + 59) / 60;
         snprintf(buf, sizeof(buf), "&d%d=%ld", i + 1, minutes);
         url += buf;
     }
@@ -530,7 +583,7 @@ static gboolean draw_today_dist(GtkWidget *widget, GdkEventExpose *event, gpoint
     int w = widget->allocation.width;
     int h = widget->allocation.height;
 
-    int left = 50, right = 20, top = 60, bottom = 60;
+    int left = 50, right = 20, top = 40, bottom = 60;
 
     cairo_set_source_rgb(cr, 0, 0, 0);
     cairo_set_line_width(cr, 2);
@@ -542,7 +595,7 @@ static gboolean draw_today_dist(GtkWidget *widget, GdkEventExpose *event, gpoint
 
     long maxv = 3600;
     for (int i = 0; i < 12; i++)
-        if (g_stats.today_buckets[i] > maxv) maxv = g_stats.today_buckets[i];
+        if (g_stats.view_daily_buckets[i] > maxv) maxv = g_stats.view_daily_buckets[i];
 
     int chart_w = w - left - right;
     int chart_h = h - top - bottom - 100;
@@ -552,7 +605,7 @@ static gboolean draw_today_dist(GtkWidget *widget, GdkEventExpose *event, gpoint
 
     for (int i = 0; i < 12; i++) {
         double x = left + bar_space * i + (bar_space - bar_w) / 2;
-        double val = g_stats.today_buckets[i];
+        double val = g_stats.view_daily_buckets[i];
         double bh = (val / (double)maxv) * chart_h;
         double y = h - bottom - bh;
 
@@ -578,7 +631,7 @@ static gboolean draw_today_dist(GtkWidget *widget, GdkEventExpose *event, gpoint
 
     int best = 0;
     for (int i = 1; i < 12; i++)
-        if (g_stats.today_buckets[i] > g_stats.today_buckets[best]) best = i;
+        if (g_stats.view_daily_buckets[i] > g_stats.view_daily_buckets[best]) best = i;
 
     char comment[128];
     snprintf(comment, sizeof(comment),
@@ -588,27 +641,127 @@ static gboolean draw_today_dist(GtkWidget *widget, GdkEventExpose *event, gpoint
     cairo_move_to(cr, left + 20, top + 40);
     cairo_show_text(cr, comment);
 
-    char today_total_str[64];
-    format_hms(g_stats.today_seconds, today_total_str, sizeof(today_total_str));
-
-    char today_title[128];
-    snprintf(today_title, sizeof(today_title), "今日总时长: %s", today_total_str);
-
-    cairo_set_source_rgb(cr, 0, 0, 0);
-    cairo_set_font_size(cr, 50);
-    cairo_move_to(cr, left, top - 10);
-    cairo_show_text(cr, today_title);
-
     cairo_destroy(cr);
     return FALSE;
 }
 
+// 用于日视图的控件包
+typedef struct {
+    GtkWidget *drawing_area;
+    GtkWidget *label_total_time; // 显示 "总时长: XX"
+    GtkWidget *label_year;       // 显示 "2023"
+    GtkWidget *label_date;       // 显示 "10月27日"
+} DailyViewWidgets;
+
+// 辅助函数：更新日视图的文本内容
+static void update_daily_view_ui(DailyViewWidgets *dv) {
+    // 1. 更新日期显示
+    struct tm tmv;
+    localtime_r(&g_view_daily_ts, &tmv);
+    
+    char buf_year[16], buf_date[32];
+    snprintf(buf_year, sizeof(buf_year), "%d", tmv.tm_year + 1900);
+    snprintf(buf_date, sizeof(buf_date), "%02d月%02d日", tmv.tm_mon + 1, tmv.tm_mday);
+    
+    gtk_label_set_text(GTK_LABEL(dv->label_year), buf_year);
+    gtk_label_set_text(GTK_LABEL(dv->label_date), buf_date);
+
+    // 2. 更新总时长显示
+    char time_str[64];
+    format_hms(g_stats.view_daily_seconds, time_str, sizeof(time_str));
+    
+    char total_label_str[128];
+    snprintf(total_label_str, sizeof(total_label_str), "当日时长: %s", time_str);
+    gtk_label_set_text(GTK_LABEL(dv->label_total_time), total_label_str);
+}
+
+// 前一天/后一天 按钮回调
+static void on_daily_change(GtkButton *btn, gpointer data) {
+    DailyViewWidgets *dv = (DailyViewWidgets*)data;
+    int offset = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(btn), "offset"));
+    
+    // 调整日期
+    g_view_daily_ts += (offset * 24 * 3600);
+    
+    // 重新计算数据
+    // 注意：force_reload=true 会重读文件，虽然略慢但最准确
+    read_logs_and_compute_stats(g_stats, g_view_year, g_view_month, false);
+    
+    // 更新UI和重绘
+    update_daily_view_ui(dv);
+    gtk_widget_queue_draw(dv->drawing_area);
+}
+
 static GtkWidget* create_today_page() {
-    GtkWidget *da = gtk_drawing_area_new();
-    gtk_widget_set_size_request(da, 800, 500);
-    g_signal_connect(G_OBJECT(da), "expose-event",
+    // 初始化查看日期为今天
+    time_t now = time(NULL);
+    g_view_daily_ts = get_day_start(now);
+
+    DailyViewWidgets *dv = (DailyViewWidgets*)g_malloc0(sizeof(DailyViewWidgets));
+    GtkWidget *vbox = gtk_vbox_new(FALSE, 0);
+
+    // --- 顶部控制栏 (HBox) ---
+    GtkWidget *hbox = gtk_hbox_new(FALSE, 5);
+    gtk_container_set_border_width(GTK_CONTAINER(hbox), 10);
+
+    // 1. 左侧：总时长 (占用主要空间)
+    dv->label_total_time = gtk_label_new("");
+    PangoFontDescription *font_big = pango_font_description_from_string("Sans 14");
+    gtk_widget_modify_font(dv->label_total_time, font_big);
+    // 靠左对齐
+    gtk_misc_set_alignment(GTK_MISC(dv->label_total_time), 0.0, 0.5); 
+    gtk_box_pack_start(GTK_BOX(hbox), dv->label_total_time, TRUE, TRUE, 5);
+
+    // 2. 右侧区域：[<] [日期] [>]
+    // 按钮 <
+    GtkWidget *btn_prev = gtk_button_new_with_label("<");
+    gtk_widget_set_size_request(btn_prev, 60, 60);
+    g_object_set_data(G_OBJECT(btn_prev), "offset", GINT_TO_POINTER(-1));
+    g_signal_connect(G_OBJECT(btn_prev), "clicked", G_CALLBACK(on_daily_change), dv);
+
+    // 日期显示 (垂直排列年和月日)
+    GtkWidget *vbox_date = gtk_vbox_new(FALSE, 0);
+    dv->label_year = gtk_label_new("");
+    dv->label_date = gtk_label_new("");
+    
+    PangoFontDescription *font_small = pango_font_description_from_string("Sans 10");
+    PangoFontDescription *font_med = pango_font_description_from_string("Sans Bold 12");
+    gtk_widget_modify_font(dv->label_year, font_small);
+    gtk_widget_modify_font(dv->label_date, font_med);
+    
+    gtk_box_pack_start(GTK_BOX(vbox_date), dv->label_year, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(vbox_date), dv->label_date, TRUE, TRUE, 0);
+
+    // 按钮 >
+    GtkWidget *btn_next = gtk_button_new_with_label(">");
+    gtk_widget_set_size_request(btn_next, 60, 60);
+    g_object_set_data(G_OBJECT(btn_next), "offset", GINT_TO_POINTER(1));
+    g_signal_connect(G_OBJECT(btn_next), "clicked", G_CALLBACK(on_daily_change), dv);
+
+    // 组装右侧
+    gtk_box_pack_start(GTK_BOX(hbox), btn_prev, FALSE, FALSE, 5);
+    gtk_box_pack_start(GTK_BOX(hbox), vbox_date, FALSE, FALSE, 5);
+    gtk_box_pack_start(GTK_BOX(hbox), btn_next, FALSE, FALSE, 5);
+
+    // --- 底部图表 ---
+    dv->drawing_area = gtk_drawing_area_new();
+    gtk_widget_set_size_request(dv->drawing_area, 800, 500); // 这里的宽度根据实际情况调整
+    g_signal_connect(G_OBJECT(dv->drawing_area), "expose-event",
                      G_CALLBACK(draw_today_dist), NULL);
-    return da;
+
+    // 组装整体
+    gtk_box_pack_start(GTK_BOX(vbox), hbox, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(vbox), dv->drawing_area, TRUE, TRUE, 0);
+
+    // 初始显示更新
+    read_logs_and_compute_stats(g_stats, g_view_year, g_view_month, true);
+    update_daily_view_ui(dv);
+
+    pango_font_description_free(font_big);
+    pango_font_description_free(font_small);
+    pango_font_description_free(font_med);
+
+    return vbox;
 }
 
 
@@ -1504,7 +1657,7 @@ int main(int argc, char *argv[]) {
     };
 
     add_tab(create_overview_page(), "概览");
-    add_tab(create_today_page(), "今日分布");
+    add_tab(create_today_page(), "每日分布");
     add_tab(create_week_page(), "周分布");
     add_tab(create_month_page(), "阅读日历");
     add_tab(create_settings_page(), "更多");
