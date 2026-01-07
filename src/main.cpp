@@ -1,5 +1,6 @@
-// main.cpp - Kindle GTK2 reading stats app (multi-file + separate week view)
-// Author: Copilot (for Kindle GTK2.0)
+// main.cpp - Kindle GTK2 reading stats app 
+
+// INCLUDE
 
 #include <gtk/gtk.h>
 #include <cairo.h>
@@ -18,7 +19,7 @@
 #include <algorithm>
 #include "qrcodegen.hpp"
 
-// —— 路径常量定义 ——
+// —— 常量定义 ——
 // 基础路径
 static const std::string BASE_DIR = "/mnt/us/extensions/kykky/";
 
@@ -32,6 +33,7 @@ static const std::string CONFIG_FILE = BASE_DIR + "etc/config.ini";
 static const char *LOG_PREFIX = "metrics_reader_"; 
 static const char *TEMP_LOG_FILE = "/tmp/kykky_history.log";
 
+//其他常量
 static const int DEFAULT_TARGET_MINUTES = 30;
 static const int MIN_TARGET_MINUTES = 10;
 static const int MAX_TARGET_MINUTES = 180;
@@ -40,6 +42,8 @@ static int g_daily_target_minutes = DEFAULT_TARGET_MINUTES;
 static std::string g_share_domain = "reading.tqhyg.net";
 
 static GdkColor white = {0, 0xffff, 0xffff, 0xffff};
+
+//结构体定义
 
 // —— 统计结构 ——
 struct Stats {
@@ -66,10 +70,27 @@ struct Stats {
     bool loaded;
 };
 
+// 用于日视图的控件包
+typedef struct {
+    GtkWidget *drawing_area;
+    GtkWidget *label_total_time; // 显示 "总时长: XX"
+    GtkWidget *label_year;       // 显示 "2023"
+    GtkWidget *label_date;       // 显示 "10月27日"
+} DailyViewWidgets;
+
+// —— 月视图 ——
+typedef struct {
+    GtkWidget *drawing_area;
+    GtkWidget *label_title;
+} MonthViewWidgets;
+
 static Stats g_stats;
 static time_t g_view_daily_ts;
 static int g_view_year;
 static int g_view_month;
+
+static GtkWidget *g_notebook = NULL;      // 全局笔记本控件指针
+static DailyViewWidgets *g_daily_widgets = NULL; // 全局日视图组件指针
 
 // —— 时间工具 ——
 static time_t get_day_start(time_t t) {
@@ -645,14 +666,6 @@ static gboolean draw_today_dist(GtkWidget *widget, GdkEventExpose *event, gpoint
     return FALSE;
 }
 
-// 用于日视图的控件包
-typedef struct {
-    GtkWidget *drawing_area;
-    GtkWidget *label_total_time; // 显示 "总时长: XX"
-    GtkWidget *label_year;       // 显示 "2023"
-    GtkWidget *label_date;       // 显示 "10月27日"
-} DailyViewWidgets;
-
 // 辅助函数：更新日视图的文本内容
 static void update_daily_view_ui(DailyViewWidgets *dv) {
     // 1. 更新日期显示
@@ -698,6 +711,7 @@ static GtkWidget* create_today_page() {
     g_view_daily_ts = get_day_start(now);
 
     DailyViewWidgets *dv = (DailyViewWidgets*)g_malloc0(sizeof(DailyViewWidgets));
+    g_daily_widgets = dv;
     GtkWidget *vbox = gtk_vbox_new(FALSE, 0);
 
     // --- 顶部控制栏 (HBox) ---
@@ -855,13 +869,6 @@ static GtkWidget* create_week_page() {
                      G_CALLBACK(draw_week_dist), NULL);
     return da;
 }
-
-
-// —— 月视图 ——
-typedef struct {
-    GtkWidget *drawing_area;
-    GtkWidget *label_title;
-} MonthViewWidgets;
 
 // 将比例值（0.0-1.0）映射到16阶灰度值（0.0-1.0）
 // ratio=0.0 → 灰度=1.0（白色）
@@ -1043,6 +1050,94 @@ static void month_next(GtkButton *b, gpointer data) {
     gtk_widget_queue_draw(mv->drawing_area);
 }
 
+static gboolean on_month_click(GtkWidget *widget, GdkEventButton *event, gpointer data) {
+    if (event->type != GDK_BUTTON_PRESS) return FALSE;
+
+    // 1. 获取和绘图函数完全一致的布局参数
+    int w = widget->allocation.width;
+    int h = widget->allocation.height;
+
+    int left = 20, top = 10, right = 20, bottom = 10;
+    int grid_w = w - left - right;
+    int grid_h = h - top - bottom;
+
+    // 如果点击在边距外，直接忽略
+    if (event->x < left || event->x > w - right ||
+        event->y < top  || event->y > h - bottom) {
+        return FALSE;
+    }
+
+    // 2. 计算单元格大小 (和绘图函数保持一致)
+    int rows = 7; // 1行标题 + 6行日期
+    int cols = 7;
+    double cw = grid_w / (double)cols;
+    double ch = grid_h / (double)rows;
+
+    // 3. 计算点击的行列索引
+    // x 减去左边距，除以宽
+    int col = (int)((event->x - left) / cw);
+    // y 减去上边距，除以高
+    int row = (int)((event->y - top) / ch);
+
+    // 4. 过滤无效区域
+    // row == 0 是标题栏 ("Mon", "Tue"...), 点击无效
+    if (row < 1 || row >= rows) return FALSE;
+    if (col < 0 || col >= cols) return FALSE;
+
+    // 5. 核心：将行列映射回日期
+    // 注意：row 0 是标题，row 1 才是第一行日期，所以实际的日期行索引是 row - 1
+    int effective_row = row - 1; 
+
+    // 计算当月1号是星期几 (0=Mon, ... 6=Sun)
+    // 你的绘图逻辑是: wday==0?6:wday-1，说明是周一开头
+    struct tm tm_first = {0};
+    tm_first.tm_year = g_view_year - 1900;
+    tm_first.tm_mon = g_view_month - 1;
+    tm_first.tm_mday = 1;
+    mktime(&tm_first); // 标准库 mktime: Sun=0, Mon=1...
+    
+    // 转换成 Mon=0, Sun=6 的格式，必须和绘图函数完全一致
+    int start_wday = (tm_first.tm_wday + 6) % 7; 
+
+    // 6. 算出点击的是第几个格子 (相对于第一个日期格)
+    int cell_index = effective_row * 7 + col;
+    
+    // 7. 算出具体几号
+    int day = cell_index - start_wday + 1;
+
+    // 8. 校验日期有效性
+    int days_in_this_month = days_in_month(g_view_year, g_view_month);
+
+    if (day > 0 && day <= days_in_this_month) {
+        // --- 下面是跳转逻辑，保持你原来的不变 ---
+        
+        // A. 构造目标日期
+        struct tm target_tm = tm_first;
+        target_tm.tm_mday = day;
+        time_t target_ts = mktime(&target_tm);
+        
+        // B. 更新全局日期
+        g_view_daily_ts = target_ts;
+
+        // C. 刷新数据
+        refresh_daily_view_data(g_stats, g_view_daily_ts);
+        
+        // D. 更新日视图 UI
+        if (g_daily_widgets) {
+            update_daily_view_ui(g_daily_widgets);
+            gtk_widget_queue_draw(g_daily_widgets->drawing_area);
+        }
+
+        // E. 切换 Tab
+        if (g_notebook) {
+            // 请确认 "今日分布" 确实是第 2 个 tab (索引 1)
+            gtk_notebook_set_current_page(GTK_NOTEBOOK(g_notebook), 1);
+        }
+    }
+
+    return TRUE;
+}
+
 static GtkWidget* create_month_page() {
     GtkWidget *vbox = gtk_vbox_new(FALSE, 5);
 
@@ -1060,6 +1155,11 @@ static GtkWidget* create_month_page() {
     gtk_box_pack_start(GTK_BOX(hbox), btn_next, FALSE, FALSE, 5);
 
     GtkWidget *da = gtk_drawing_area_new();
+
+    // 允许画布接收点击事件
+    gtk_widget_add_events(da, GDK_BUTTON_PRESS_MASK);
+    g_signal_connect(G_OBJECT(da), "button-press-event", 
+                     G_CALLBACK(on_month_click), NULL);
 
     mv->drawing_area = da;
     gtk_widget_set_size_request(da, 800, 500);
@@ -1638,6 +1738,7 @@ int main(int argc, char *argv[]) {
     gtk_widget_destroy(align); 
 
     GtkWidget *nb = gtk_notebook_new();
+    g_notebook = nb;
     gtk_notebook_set_tab_pos(GTK_NOTEBOOK(nb), GTK_POS_TOP);
     gtk_box_pack_start(GTK_BOX(vbox), nb, TRUE, TRUE, 0);
 
