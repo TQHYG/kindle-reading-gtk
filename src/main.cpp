@@ -1758,7 +1758,7 @@ int main(int argc, char *argv[]) {
     };
 
     add_tab(create_overview_page(), "概览");
-    add_tab(create_today_page(), "每日分布");
+    add_tab(create_today_page(), "时段详情");
     add_tab(create_week_page(), "周分布");
     add_tab(create_month_page(), "阅读日历");
     add_tab(create_settings_page(), "更多");
