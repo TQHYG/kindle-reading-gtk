@@ -313,22 +313,6 @@ static void parse_line_and_update(char *line, Stats &s,
         }
     }
 
-    // 更新全历史每日统计
-    t_cursor = start_time;
-    while (t_cursor < end_time) {
-        time_t day_start_ts = get_day_start(t_cursor);
-        time_t next_day_ts = day_start_ts + 24 * 3600;
-        
-        time_t clip_end = std::min(end_time, next_day_ts);
-        
-        // 累加时长到对应日期
-        if (clip_end > t_cursor) {
-            s.history_map[day_start_ts] += (clip_end - t_cursor);
-        }
-        
-        t_cursor = clip_end;
-    }
-
 }
 
 // —— 数据预处理 ——
