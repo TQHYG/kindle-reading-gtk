@@ -8,6 +8,14 @@ gtk_dep = dependency('gtk+-2.0')
 ###
 sources = files(
     './src/main.cpp',
+    './src/daily.cpp',
+    './src/dataprocess.cpp',
+    './src/month.cpp',
+    './src/overview.cpp',
+    './src/settingsui.cpp',
+    './src/share.cpp',
+    './src/utils.cpp',
+    './src/week.cpp',
     './thirdparty/qrcodegen/cpp/qrcodegen.cpp'
 )
 
