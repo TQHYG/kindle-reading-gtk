@@ -295,6 +295,7 @@ void on_do_sync(GtkButton *btn, gpointer user_data) {
     std::string err = net.upload_data(g_stats.today_seconds, g_stats.month_seconds);
     if (err.empty()) {
         gtk_label_set_text(GTK_LABEL(lbl), "同步成功！");
+        refresh_all_status_labels(); 
     } else {
         std::string msg = "同步失败: " + err;
         gtk_label_set_text(GTK_LABEL(lbl), msg.c_str());
@@ -303,12 +304,12 @@ void on_do_sync(GtkButton *btn, gpointer user_data) {
 
 static void on_logout_confirm(GtkWidget *widget, gpointer dialog_ptr) {
     GtkWidget *dialog = GTK_WIDGET(dialog_ptr);
-    KykkyNetwork &net = KykkyNetwork::instance(); // 获取单例解决未定义问题
+    KykkyNetwork &net = KykkyNetwork::instance();
     
     gtk_widget_set_sensitive(widget, FALSE);
     
     if (net.logout()) {
-        refresh_all_status_labels(); // 使用统一刷新函数，不再依赖本地指针
+        refresh_all_status_labels();
         gtk_widget_destroy(dialog);
     } else {
         gtk_widget_set_sensitive(widget, TRUE);
