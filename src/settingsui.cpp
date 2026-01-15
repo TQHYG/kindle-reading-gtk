@@ -392,7 +392,7 @@ void on_cloud_sync_clicked(GtkButton *btn, gpointer data) {
 
         GtkWidget *vbtn_box = gtk_vbox_new(FALSE, 10);
         gtk_container_add(GTK_CONTAINER(outer_align), vbtn_box);
-        gtk_alignment_set_padding(GTK_ALIGNMENT(outer_align), 0, 0, 50, 50);
+        gtk_alignment_set_padding(GTK_ALIGNMENT(outer_align), 0, 0, 100, 100);
         gtk_box_pack_start(GTK_BOX(vbox), vbtn_box, FALSE, FALSE, 0);
 
         auto make_halfwidth_button = [&](const char *text) {

@@ -431,6 +431,20 @@ std::string KykkyNetwork::poll_login_status(const std::string& d_code) {
 
 
 std::string KykkyNetwork::upload_data(long today, long month) {
+    // ---上传前的身份有效性预检 ---
+    if (!this->access_token.empty()) {
+        std::string check_url = "https://" + domain + "/api/auth.php?action=check_status&device_code=" + this->device_code;
+        std::string resp = http_get(check_url);
+        
+        // 如果服务端返回 expired，说明设备已在后台被删
+        if (resp.find("expired") != std::string::npos) {
+            std::cout << "[Network] Device expired, skipping upload and clearing local auth." << std::endl;
+            clear_local_auth(); // 清除本地 state 和 token
+            refresh_all_status_labels(); // 刷新 UI 小字
+            return "device_expired"; 
+        }
+    }
+
     std::string url = "https://" + domain + "/api/upload.php";
     std::vector<std::string> files;
 
