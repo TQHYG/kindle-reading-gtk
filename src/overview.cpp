@@ -1,5 +1,8 @@
+#include <gtk/gtk.h>
+
 #include "types.hpp"
 #include "utils.hpp"
+#include "network.hpp"
 #include "overview.hpp"
 
 // —— 概览页 ——
@@ -8,12 +11,27 @@ GtkWidget* create_overview_page() {
     GtkWidget *eventbox = gtk_event_box_new();
     gtk_widget_modify_bg(eventbox, GTK_STATE_NORMAL, &white);
 
+    GtkWidget *align_top = gtk_alignment_new(1, 0, 0, 0); // 右上对齐
+    KykkyNetwork &net = KykkyNetwork::instance();
+    std::string top_text = net.get_user_info().is_logged_in ? 
+                           "已同步: " + net.get_last_sync_text() : 
+                           "未登录";
+    
+    GtkWidget *lbl_top_status = gtk_label_new(top_text.c_str());
+    PangoFontDescription *tiny_font = pango_font_description_from_string("Sans 8");
+    gtk_widget_modify_font(lbl_top_status, tiny_font);
+    g_ui_handles.lbl_overview_sync_time = lbl_top_status;
+
+    gtk_container_add(GTK_CONTAINER(align_top), lbl_top_status);
+
     // 居中用的对齐控件
     GtkWidget *align = gtk_alignment_new(0.5, 0.5, 0, 0);
     gtk_container_add(GTK_CONTAINER(eventbox), align);
 
     GtkWidget *vbox = gtk_vbox_new(FALSE, 20);
     gtk_container_add(GTK_CONTAINER(align), vbox);
+
+    gtk_box_pack_start(GTK_BOX(vbox), align_top, FALSE, FALSE, 0);
 
     bool today_target_met = g_stats.today_seconds >= (g_daily_target_minutes * 60);
     char target_status[128];

@@ -24,6 +24,7 @@
 #include "week.hpp"
 #include "month.hpp"
 #include "overview.hpp"
+#include "network.hpp"
 #include "settingsui.hpp"
 
 // —— 常量定义 ——
@@ -36,6 +37,8 @@ const std::string ETC_ENABLE_FILE = BASE_DIR + "etc/enable";
 const std::string SETUP_SCRIPT = BASE_DIR + "bin/metrics_setup.sh";
 const std::string ARCHIVE_FILE = BASE_DIR + "log/history.gz";
 const std::string CONFIG_FILE = BASE_DIR + "etc/config.ini";
+const std::string ETC_TOKEN_FILE = BASE_DIR + "etc/token";
+const std::string STATE_FILE = BASE_DIR + "etc/state";
 
 const char *LOG_PREFIX = "metrics_reader_"; 
 const char *TEMP_LOG_FILE = "/tmp/kykky_history.log";
@@ -50,12 +53,14 @@ int g_daily_target_minutes = DEFAULT_TARGET_MINUTES;
 std::string g_share_domain = "reading.tqhyg.net";
 
 GdkColor white = {0, 0xffff, 0xffff, 0xffff};
+GdkColor gray = {0, 0x8888, 0x8888, 0x8888};
 
 Stats g_stats;
 int g_view_year;
 int g_view_month;
 time_t g_view_daily_ts;
 
+UIHandles g_ui_handles = {NULL, NULL};
 GtkWidget *g_notebook = NULL;      // 全局笔记本控件指针
 DailyViewWidgets *g_daily_widgets = NULL; // 全局日视图组件指针
 
@@ -122,6 +127,7 @@ int main(int argc, char *argv[]) {
     preprocess_data();
 
     load_target_config(); 
+    KykkyNetwork::instance().init();
 
     time_t now = time(NULL);
     struct tm tmv;
@@ -130,6 +136,9 @@ int main(int argc, char *argv[]) {
     g_view_month = tmv.tm_mon + 1;
 
     read_logs_and_compute_stats(g_stats, g_view_year, g_view_month, true);
+    if (KykkyNetwork::instance().check_internet()) {
+        KykkyNetwork::instance().upload_data(g_stats.today_seconds, g_stats.month_seconds);
+    }
 
     // 5. 销毁等待界面并切换到正式内容
     gtk_widget_destroy(align); 

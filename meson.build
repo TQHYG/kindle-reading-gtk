@@ -2,6 +2,7 @@ project('kindle-reading-gtk', 'cpp', version: 'v1.0.0', default_options: ['cpp_s
 
 # Define dependencies we want
 gtk_dep = dependency('gtk+-2.0')
+curl_dep = dependency('libcurl')
 
 ###
 # Project definition
@@ -16,6 +17,7 @@ sources = files(
     './src/share.cpp',
     './src/utils.cpp',
     './src/week.cpp',
+    './src/network.cpp',
     './thirdparty/qrcodegen/cpp/qrcodegen.cpp'
 )
 
@@ -24,4 +26,11 @@ include_dirs = include_directories(
   './thirdparty/qrcodegen/cpp/'
 )
 
-executable('kindle-reading-gtk', sources, include_directories: include_dirs, dependencies: [gtk_dep], cpp_args: '-static-libstdc++', link_args: '-static-libstdc++')
+executable(
+  'kindle-reading-gtk',
+  sources,
+  include_directories: include_dirs,
+  dependencies: [gtk_dep, curl_dep],
+  cpp_args: '-static-libstdc++',
+  link_args: ['-static-libstdc++', '-Wl,-rpath=./']
+  )

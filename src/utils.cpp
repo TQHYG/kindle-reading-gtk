@@ -1,4 +1,5 @@
 #include "types.hpp"
+#include "network.hpp"
 #include "utils.hpp"
 
 #include <cairo.h>
@@ -128,4 +129,54 @@ void load_target_config() {
     if (!has_target || !has_domain) {
         save_target_config();
     }
+}
+
+
+void run_command(const char* cmd) {
+    system(cmd);
+}
+
+bool file_exists(const std::string& path) {
+    struct stat st;
+    return (stat(path.c_str(), &st) == 0);
+}
+
+// 在 utils.cpp 中添加
+void refresh_all_status_labels() {
+    KykkyNetwork &net = KykkyNetwork::instance();
+
+    // 1. 刷新设置页的小字
+    if (g_ui_handles.lbl_settings_cloud_status) {
+        gtk_label_set_text(GTK_LABEL(g_ui_handles.lbl_settings_cloud_status), 
+                           net.get_user_info().is_logged_in ? "云端同步已就绪" : "尚未登录");
+    }
+
+    // 2. 刷新概览页右上角同步时间
+    if (g_ui_handles.lbl_overview_sync_time) {
+        std::string top_text = net.get_user_info().is_logged_in ? 
+                               "已同步: " + net.get_last_sync_text() : "未登录 (点设置)";
+        gtk_label_set_text(GTK_LABEL(g_ui_handles.lbl_overview_sync_time), top_text.c_str());
+    }
+
+}
+
+static const std::string base64_chars =
+"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+"abcdefghijklmnopqrstuvwxyz"
+"0123456789+/";
+
+std::string base64_encode(const std::string& in) {
+    std::string out;
+    int val = 0, valb = -6;
+    for (unsigned char c : in) {
+        val = (val << 8) + c;
+        valb += 8;
+        while (valb >= 0) {
+            out.push_back(base64_chars[(val >> valb) & 0x3F]);
+            valb -= 6;
+        }
+    }
+    if (valb > -6) out.push_back(base64_chars[((val << 8) >> (valb + 8)) & 0x3F]);
+    while (out.size() % 4) out.push_back('=');
+    return out;
 }

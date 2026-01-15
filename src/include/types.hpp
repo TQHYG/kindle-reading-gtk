@@ -45,6 +45,11 @@ typedef struct {
     GtkWidget *label_title;
 } MonthViewWidgets;
 
+struct UIHandles {
+    GtkWidget *lbl_settings_cloud_status; // 设置页：“尚未登录/已连接”
+    GtkWidget *lbl_overview_sync_time;   // 概览页底部：“上次同步：12:00”
+};
+
 
 // 声明常量
 extern const std::string BASE_DIR;
@@ -53,6 +58,8 @@ extern const std::string ETC_ENABLE_FILE;
 extern const std::string SETUP_SCRIPT;
 extern const std::string ARCHIVE_FILE;
 extern const std::string CONFIG_FILE;
+extern const std::string ETC_TOKEN_FILE;
+extern const std::string STATE_FILE;
 
 extern const char *LOG_PREFIX; 
 extern const char *TEMP_LOG_FILE;
@@ -65,12 +72,14 @@ extern const int MAX_TARGET_MINUTES;
 extern int g_daily_target_minutes;
 extern std::string g_share_domain;
 extern GdkColor white;
+extern GdkColor gray;
 
 extern Stats g_stats;
 extern int g_view_year;
 extern int g_view_month;
 extern time_t g_view_daily_ts;
 
+extern UIHandles g_ui_handles;
 extern GtkWidget *g_notebook;
 extern DailyViewWidgets *g_daily_widgets;
 

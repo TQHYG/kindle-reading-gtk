@@ -8,6 +8,7 @@ bool is_metrics_enabled();
 void on_toggle_enable_button(GtkButton *btn, gpointer data);
 void on_reset_data(GtkButton *btn, gpointer user_data);
 void on_target_change(GtkButton *btn, gpointer data);
+void on_cloud_sync_clicked(GtkButton *btn, gpointer data);
 
 GtkWidget* create_settings_page();
 
