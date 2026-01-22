@@ -15,6 +15,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <map>
+#include <X11/Xlib.h>
+#include <X11/Xatom.h>
 
 #include "types.hpp"
 #include "utils.hpp"
@@ -48,6 +50,8 @@ const int DEFAULT_TARGET_MINUTES = 30;
 const int MIN_TARGET_MINUTES = 10;
 const int MAX_TARGET_MINUTES = 180;
 
+const char* APP_TITLE = "L:A_N:application_PC:T_ID:net.tqhyg.reading";
+
 // 全局变量
 int g_daily_target_minutes = DEFAULT_TARGET_MINUTES;
 std::string g_share_domain = "reading.tqhyg.net";
@@ -63,6 +67,48 @@ time_t g_view_daily_ts;
 UIHandles g_ui_handles = {NULL, NULL};
 GtkWidget *g_notebook = NULL;      // 全局笔记本控件指针
 DailyViewWidgets *g_daily_widgets = NULL; // 全局日视图组件指针
+
+bool check_and_raise_existing_instance(const char* window_title) {
+    Display* dpy = XOpenDisplay(NULL);
+    if (!dpy) return false;
+
+    Window root = DefaultRootWindow(dpy);
+    Window parent;
+    Window *children;
+    unsigned int nchildren;
+    bool found = false;
+
+    // 遍历根窗口的子窗口
+    if (XQueryTree(dpy, root, &root, &parent, &children, &nchildren)) {
+        for (unsigned int i = 0; i < nchildren; i++) {
+            char *name = NULL;
+            // 获取窗口标题
+            if (XFetchName(dpy, children[i], &name) && name) {
+                if (strcmp(name, window_title) == 0) {
+                    // 找到已运行的实例
+                    
+                    // 1. 将窗口置顶 (MapRaised)
+                    XMapRaised(dpy, children[i]);
+                    
+                    // 2. 尝试给予输入焦点
+                    XSetInputFocus(dpy, children[i], RevertToParent, CurrentTime);
+                    
+                    // 3. 刷新显示
+                    XFlush(dpy);
+                    
+                    found = true;
+                    XFree(name);
+                    break;
+                }
+                XFree(name);
+            }
+        }
+        if (children) XFree(children);
+    }
+
+    XCloseDisplay(dpy);
+    return found;
+}
 
 // —— 退出页 ——
 static GtkWidget* create_exit_page() {
@@ -90,12 +136,18 @@ static void on_notebook_switch_page(GtkNotebook *notebook,
 
 // —— 主函数 —— 
 int main(int argc, char *argv[]) {
+    // 0. 单例检查
+    
+    if (check_and_raise_existing_instance(APP_TITLE)) {
+        printf("Application is already running. Raised existing window.\n");
+        return 0; // 退出新进程
+    }
+
     gtk_init(&argc, &argv);
 
     // 1. 初始化窗口和主容器
     GtkWidget *win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(win),
-        "L:A_N:application_PC:T_ID:net.tqhyg.reading");
+    gtk_window_set_title(GTK_WINDOW(win), APP_TITLE);
     gtk_window_set_default_size(GTK_WINDOW(win), 1072, 1200);
 
     g_signal_connect(G_OBJECT(win), "destroy", G_CALLBACK(gtk_main_quit), NULL);
