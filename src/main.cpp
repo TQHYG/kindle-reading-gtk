@@ -15,8 +15,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <map>
-#include <X11/Xlib.h>
-#include <X11/Xatom.h>
 
 #include "types.hpp"
 #include "utils.hpp"
@@ -44,6 +42,7 @@ const std::string STATE_FILE = BASE_DIR + "etc/state";
 
 const char *LOG_PREFIX = "metrics_reader_"; 
 const char *TEMP_LOG_FILE = "/tmp/kykky_history.log";
+const std::string PID_FILE = "/tmp/kykky.pid";
 
 // 其他常量
 const int DEFAULT_TARGET_MINUTES = 30;
@@ -68,46 +67,22 @@ UIHandles g_ui_handles = {NULL, NULL};
 GtkWidget *g_notebook = NULL;      // 全局笔记本控件指针
 DailyViewWidgets *g_daily_widgets = NULL; // 全局日视图组件指针
 
-bool check_and_raise_existing_instance(const char* window_title) {
-    Display* dpy = XOpenDisplay(NULL);
-    if (!dpy) return false;
+pid_t get_existing_pid() {
+    FILE *f = fopen(PID_FILE.c_str(), "r");
+    if (!f) return 0;
+    pid_t pid = 0;
+    if (fscanf(f, "%d", &pid) != 1) pid = 0;
+    fclose(f);
+    return pid;
+}
 
-    Window root = DefaultRootWindow(dpy);
-    Window parent;
-    Window *children;
-    unsigned int nchildren;
-    bool found = false;
-
-    // 遍历根窗口的子窗口
-    if (XQueryTree(dpy, root, &root, &parent, &children, &nchildren)) {
-        for (unsigned int i = 0; i < nchildren; i++) {
-            char *name = NULL;
-            // 获取窗口标题
-            if (XFetchName(dpy, children[i], &name) && name) {
-                if (strcmp(name, window_title) == 0) {
-                    // 找到已运行的实例
-                    
-                    // 1. 将窗口置顶 (MapRaised)
-                    XMapRaised(dpy, children[i]);
-                    
-                    // 2. 尝试给予输入焦点
-                    XSetInputFocus(dpy, children[i], RevertToParent, CurrentTime);
-                    
-                    // 3. 刷新显示
-                    XFlush(dpy);
-                    
-                    found = true;
-                    XFree(name);
-                    break;
-                }
-                XFree(name);
-            }
-        }
-        if (children) XFree(children);
+bool check_and_raise_existing_instance() {
+    pid_t pid = get_existing_pid();
+    if (pid > 0) {
+        kill(pid, SIGTERM);
+        return true;
     }
-
-    XCloseDisplay(dpy);
-    return found;
+    return false;
 }
 
 // —— 退出页 ——
@@ -138,9 +113,14 @@ static void on_notebook_switch_page(GtkNotebook *notebook,
 int main(int argc, char *argv[]) {
     // 0. 单例检查
     
-    if (check_and_raise_existing_instance(APP_TITLE)) {
-        printf("Application is already running. Raised existing window.\n");
-        return 0; // 退出新进程
+    if (check_and_raise_existing_instance()) {
+        printf("Application is already running. Killing existing process.\n");
+    }
+
+    FILE *f = fopen(PID_FILE.c_str(), "w");
+    if (f) {
+        fprintf(f, "%d", getpid());
+        fclose(f);
     }
 
     gtk_init(&argc, &argv);
@@ -231,5 +211,6 @@ int main(int argc, char *argv[]) {
 
     // --- 清理临时文件 ---
     unlink(TEMP_LOG_FILE);
+    unlink(PID_FILE.c_str());
     return 0;
 }
