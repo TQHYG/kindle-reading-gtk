@@ -125,6 +125,8 @@ KykkyNetwork& KykkyNetwork::instance() {
 }
 
 void KykkyNetwork::init() {
+    curl_global_init(CURL_GLOBAL_DEFAULT);
+    
     if (g_share_domain.empty()) {
         g_share_domain = "reading.tqhyg.net";
     }
@@ -165,24 +167,35 @@ std::string KykkyNetwork::http_get(const std::string& url) {
     CURL *curl;
     CURLcode res;
     std::string readBuffer;
+    last_error_ = "";
 
     curl = curl_easy_init();
     if(curl) {
-        // 设置 TimeOut
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
         curl_easy_setopt(curl, CURLOPT_USERAGENT, MY_USER_AGENT);
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
-        // 忽略 SSL 校验（Kindle 老设备证书可能过期）
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-        // User Agent
         curl_easy_setopt(curl, CURLOPT_USERAGENT, "Kykky-Kindle-Client/1.0");
 
+        // 带上认证 header
+        struct curl_slist *headers = NULL;
+        if (!access_token.empty()) {
+            std::string auth = "Authorization: Bearer " + access_token;
+            headers = curl_slist_append(headers, auth.c_str());
+            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        }
+
         res = curl_easy_perform(curl);
+        curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
-        if (res != CURLE_OK) return "";
+        if (res != CURLE_OK) {
+            last_error_ = curl_easy_strerror(res);
+            return "";
+        }
     }
     return readBuffer;
 }
@@ -202,6 +215,8 @@ std::string KykkyNetwork::http_post(const std::string& url, const std::string& d
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
 
         // Header needed for auth
         struct curl_slist *headers = NULL;
@@ -250,7 +265,8 @@ std::string KykkyNetwork::http_post_files(const std::string& url, const std::vec
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L); // 上传给长一点时间
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L); // 上传超时
 
         struct curl_slist *headers = NULL;
         headers = curl_slist_append(headers, "Expect:"); // 禁用 Expect: 100-continue
@@ -280,9 +296,29 @@ std::string KykkyNetwork::http_post_files(const std::string& url, const std::vec
 }
 
 bool KykkyNetwork::check_internet() {
-    // 简单 Ping 或者是请求一个极小的页面
-    std::string resp = http_get("http://" + domain + "/style.css"); // 假设能访问
-    return !resp.empty();
+    CURL *curl;
+    CURLcode res;
+    last_error_ = "";
+
+    curl = curl_easy_init();
+    if(curl) {
+        std::string url = "http://" + domain + "/style.css";
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 3L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
+        curl_easy_setopt(curl, CURLOPT_NOBODY, 1L); // HEAD 请求，更快
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, "Kykky-Kindle-Client/1.0");
+
+        res = curl_easy_perform(curl);
+        curl_easy_cleanup(curl);
+        if (res != CURLE_OK) {
+            last_error_ = curl_easy_strerror(res);
+        }
+        return (res == CURLE_OK);
+    }
+    return false;
 }
 
 void KykkyNetwork::ensure_wifi_on() {
@@ -307,10 +343,9 @@ bool KykkyNetwork::load_token() {
         if (!access_token.empty() && access_token.back() == '\r') access_token.pop_back();
 
         if (!access_token.empty()) {
-            // 有 Token，尝试获取用户信息（或假定登陆成功，异步获取）
-            // 这里简单处理：有Token就算登陆
+            // 有 Token 就算登陆，昵称等信息由 load_state() 从缓存加载
+            // 不在初始化时做网络请求，避免阻塞启动
             current_user.is_logged_in = true;
-            fetch_user_profile(); // 尝试更新昵称
             return true;
         }
     }
@@ -341,8 +376,8 @@ bool KykkyNetwork::logout() {
     // 2. 必须有网才能调接口注销
     if (!check_internet()) return false;
 
-    // 3. 构造请求 
-    std::string url = "https://" + domain + "/api/auth.php?action=logout";
+    // 3. 构造请求 (带上 device_code 以便服务端识别设备)
+    std::string url = "https://" + domain + "/api/auth.php?action=logout&device_code=" + this->device_code;
     
     std::string resp = http_get(url);
     std::string status = extract_json_value(resp, "status");

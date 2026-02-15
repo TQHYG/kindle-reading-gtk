@@ -30,6 +30,7 @@ public:
     std::string get_access_token() const { return access_token; }
     std::string get_device_code() const { return device_code; }
     UserInfo get_user_info() const { return current_user; }
+    std::string get_last_error() const { return last_error_; }
 
     // API 请求
     // 返回 pair: <login_url, device_code>
@@ -60,6 +61,7 @@ private:
     std::string domain;
     UserInfo current_user;
     time_t last_sync_time = 0;
+    std::string last_error_;
 
     // 简易 JSON 值提取
     std::string extract_json_value(const std::string& json, const std::string& key);

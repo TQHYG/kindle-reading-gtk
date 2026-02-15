@@ -14,6 +14,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <pthread.h>
 #include <map>
 
 #include "types.hpp"
@@ -109,6 +110,38 @@ static void on_notebook_switch_page(GtkNotebook *notebook,
     }
 }
 
+// 启动时后台静默同步
+struct StartupSyncData {
+    long today_seconds;
+    long month_seconds;
+};
+
+static gboolean startup_sync_idle(gpointer data) {
+    StartupSyncData *sd = (StartupSyncData *)data;
+    refresh_all_status_labels();
+    delete sd;
+    return FALSE;
+}
+
+static gpointer startup_sync_thread(gpointer data) {
+    StartupSyncData *sd = (StartupSyncData *)data;
+    KykkyNetwork &net = KykkyNetwork::instance();
+    if (net.check_internet()) {
+        net.upload_data(sd->today_seconds, sd->month_seconds);
+    }
+    g_idle_add(startup_sync_idle, sd);
+    return NULL;
+}
+
+static void spawn_detached_thread(void*(*func)(void*), void *data) {
+    pthread_t tid;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_create(&tid, &attr, func, data);
+    pthread_attr_destroy(&attr);
+}
+
 // —— 主函数 —— 
 int main(int argc, char *argv[]) {
     // 0. 单例检查
@@ -168,9 +201,6 @@ int main(int argc, char *argv[]) {
     g_view_month = tmv.tm_mon + 1;
 
     read_logs_and_compute_stats(g_stats, g_view_year, g_view_month, true);
-    if (KykkyNetwork::instance().check_internet()) {
-        KykkyNetwork::instance().upload_data(g_stats.today_seconds, g_stats.month_seconds);
-    }
 
     // 5. 销毁等待界面并切换到正式内容
     gtk_widget_destroy(align); 
@@ -207,6 +237,15 @@ int main(int argc, char *argv[]) {
     g_signal_connect(G_OBJECT(nb), "switch-page", G_CALLBACK(on_notebook_switch_page), NULL);
 
     gtk_widget_show_all(win);
+
+    // 启动后台同步线程（不阻塞 UI）
+    if (KykkyNetwork::instance().get_user_info().is_logged_in) {
+        StartupSyncData *ssd = new StartupSyncData();
+        ssd->today_seconds = g_stats.today_seconds;
+        ssd->month_seconds = g_stats.month_seconds;
+        spawn_detached_thread(startup_sync_thread, ssd);
+    }
+
     gtk_main();
 
     // --- 清理临时文件 ---

@@ -1,6 +1,8 @@
 #include <dirent.h>
 #include <cstring>
 #include <sys/stat.h>
+#include <unistd.h>
+#include <pthread.h>
 #include <vector>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 
@@ -219,154 +221,472 @@ GtkWidget* create_qr_widget(const std::string& data) {
     return img;
 }
 
-// —— 云同步弹窗逻辑 ——
+// —— 云同步弹窗逻辑 (异步版) ——
+
+// 用 pthread 创建 detached 线程，兼容旧版 GLib
+typedef void* (*ThreadFunc)(void*);
+static void spawn_detached_thread(ThreadFunc func, void *data) {
+    pthread_t tid;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_create(&tid, &attr, func, data);
+    pthread_attr_destroy(&attr);
+}
 
 struct SyncDialogData {
     GtkWidget *dialog;
     GtkWidget *content_area;
+    GtkWidget *vbox;
+    GtkWidget *offline_container;  // 离线同步区容器
     guint poll_timer_id;
     std::string pending_device_code;
     GtkWidget *lbl_status;
+    GtkWidget *btn_sync;
+    GtkWidget *btn_logout;
+    gboolean alive;
+    gboolean sync_in_progress;
+    gboolean poll_in_progress;
+    int ref_count;
+
+    SyncDialogData() : dialog(NULL), content_area(NULL), vbox(NULL),
+                       offline_container(NULL), poll_timer_id(0),
+                       lbl_status(NULL), btn_sync(NULL), btn_logout(NULL),
+                       alive(TRUE), sync_in_progress(FALSE),
+                       poll_in_progress(FALSE), ref_count(1) {}
+
+    void ref() { ref_count++; }
+    void unref() {
+        if (--ref_count <= 0) delete this;
+    }
 };
 
-// 轮询回调
-gboolean on_poll_login(gpointer user_data) {
-    SyncDialogData *ddata = (SyncDialogData*)user_data;
-    if (!ddata->pending_device_code.empty()) {
-        std::string token = KykkyNetwork::instance().poll_login_status(ddata->pending_device_code);
-        if (!token.empty()) {
-            // 登陆成功！
-            gtk_label_set_text(GTK_LABEL(ddata->lbl_status), "登陆成功！");
-            // 停止轮询
-            ddata->poll_timer_id = 0;
-            
-            // 可以在这里触发一次自动同步
+// ---- 异步操作数据结构 ----
+
+struct AsyncQRData {
+    SyncDialogData *ddata;
+    std::string login_url;
+    std::string device_code;
+    std::string error;
+};
+
+struct AsyncPollData {
+    SyncDialogData *ddata;
+    std::string token;
+    std::string device_code;
+    long today_seconds;
+    long month_seconds;
+};
+
+struct AsyncSyncData {
+    SyncDialogData *ddata;
+    std::string error;
+    long today_seconds;
+    long month_seconds;
+    GtkWidget *btn;
+};
+
+struct AsyncLogoutData {
+    SyncDialogData *ddata;
+    bool success;
+    GtkWidget *btn;
+};
+
+struct AsyncCheckNetData {
+    SyncDialogData *ddata;
+    bool online;
+};
+
+struct AsyncUploadData {
+    SyncDialogData *ddata;
+    std::string error;
+    long today_seconds;
+    long month_seconds;
+};
+
+// ---- 异步回调：登录后自动上传 ----
+
+static gboolean auto_upload_done_idle(gpointer data) {
+    AsyncUploadData *ud = (AsyncUploadData *)data;
+    SyncDialogData *ddata = ud->ddata;
+
+    if (ddata->alive) {
+        if (ud->error.empty()) {
+            gtk_label_set_text(GTK_LABEL(ddata->lbl_status),
+                "  登录成功，数据已同步  ");
+        } else {
+            std::string msg = "  登录成功，同步失败:  \n  " + ud->error + "  ";
+            gtk_label_set_text(GTK_LABEL(ddata->lbl_status), msg.c_str());
+        }
+        refresh_all_status_labels();
+    }
+
+    ddata->unref();
+    delete ud;
+    return FALSE;
+}
+
+static gpointer auto_upload_thread(gpointer data) {
+    AsyncUploadData *ud = (AsyncUploadData *)data;
+    KykkyNetwork &net = KykkyNetwork::instance();
+    ud->error = net.upload_data(ud->today_seconds, ud->month_seconds);
+    g_idle_add(auto_upload_done_idle, ud);
+    return NULL;
+}
+
+// ---- 异步回调：登录轮询 ----
+
+static gboolean poll_login_done_idle(gpointer data) {
+    AsyncPollData *pd = (AsyncPollData *)data;
+    SyncDialogData *ddata = pd->ddata;
+
+    if (ddata->alive) {
+        ddata->poll_in_progress = FALSE;
+
+        if (!pd->token.empty()) {
+            // 登录成功，停止轮询
+            if (ddata->poll_timer_id > 0) {
+                g_source_remove(ddata->poll_timer_id);
+                ddata->poll_timer_id = 0;
+                ddata->unref(); // 释放 timer 的引用
+            }
+
+            gtk_label_set_text(GTK_LABEL(ddata->lbl_status),
+                "  登录成功！正在同步数据...  ");
             refresh_all_status_labels();
-            KykkyNetwork::instance().upload_data(g_stats.today_seconds, g_stats.month_seconds);
-            
-            return FALSE; 
+
+            // 异步上传数据
+            AsyncUploadData *ud = new AsyncUploadData();
+            ud->ddata = ddata;
+            ud->today_seconds = pd->today_seconds;
+            ud->month_seconds = pd->month_seconds;
+            ddata->ref();
+            spawn_detached_thread(auto_upload_thread, ud);
         }
     }
-    return TRUE; // 继续轮询
+
+    ddata->unref(); // 释放 poll thread 的引用
+    delete pd;
+    return FALSE;
 }
 
-// 弹窗销毁时清理定时器
-void on_dialog_destroy(GtkWidget *widget, gpointer user_data) {
-    SyncDialogData *ddata = (SyncDialogData*)user_data;
+static gpointer poll_login_thread(gpointer data) {
+    AsyncPollData *pd = (AsyncPollData *)data;
+    pd->token = KykkyNetwork::instance().poll_login_status(pd->device_code);
+    g_idle_add(poll_login_done_idle, pd);
+    return NULL;
+}
+
+// 轮询定时器回调 (主线程，不阻塞)
+static gboolean on_poll_login(gpointer user_data) {
+    SyncDialogData *ddata = (SyncDialogData *)user_data;
+    if (!ddata->alive) {
+        ddata->unref(); // timer 引用
+        return FALSE;
+    }
+    if (ddata->poll_in_progress || ddata->pending_device_code.empty()) {
+        return TRUE; // 上次轮询还在进行中，跳过
+    }
+
+    ddata->poll_in_progress = TRUE;
+    ddata->ref(); // thread 引用
+
+    AsyncPollData *pd = new AsyncPollData();
+    pd->ddata = ddata;
+    pd->device_code = ddata->pending_device_code;
+    pd->today_seconds = g_stats.today_seconds;
+    pd->month_seconds = g_stats.month_seconds;
+
+    spawn_detached_thread(poll_login_thread, pd);
+    return TRUE;
+}
+
+// ---- 对话框销毁清理 ----
+
+static void on_dialog_destroy(GtkWidget *widget, gpointer user_data) {
+    SyncDialogData *ddata = (SyncDialogData *)user_data;
+    ddata->alive = FALSE;
     if (ddata->poll_timer_id > 0) {
         g_source_remove(ddata->poll_timer_id);
+        ddata->poll_timer_id = 0;
+        ddata->unref(); // timer 引用
     }
-    delete ddata;
+    ddata->unref(); // dialog 自身的引用
 }
 
-void on_do_sync(GtkButton *btn, gpointer user_data) {
-    GtkWidget *lbl = (GtkWidget*)user_data;
-    gtk_label_set_text(GTK_LABEL(lbl), "正在连接服务器...");
-    
-    // 强制刷新 UI
-    while (gtk_events_pending()) gtk_main_iteration();
+// ---- 异步同步 ----
 
+static gboolean do_sync_done_idle(gpointer data) {
+    AsyncSyncData *sd = (AsyncSyncData *)data;
+    SyncDialogData *ddata = sd->ddata;
+
+    if (ddata->alive) {
+        ddata->sync_in_progress = FALSE;
+        if (sd->btn) gtk_widget_set_sensitive(sd->btn, TRUE);
+
+        if (sd->error.empty()) {
+            gtk_label_set_text(GTK_LABEL(ddata->lbl_status),
+                "  同步成功！  ");
+        } else if (sd->error == "no_network") {
+            gtk_label_set_text(GTK_LABEL(ddata->lbl_status),
+                "  网络连接失败，请检查 WiFi  ");
+        } else if (sd->error == "device_expired") {
+            gtk_label_set_text(GTK_LABEL(ddata->lbl_status),
+                "  设备授权已过期，请重新登录  ");
+        } else {
+            std::string msg = "  同步失败: " + sd->error + "  ";
+            gtk_label_set_text(GTK_LABEL(ddata->lbl_status), msg.c_str());
+        }
+        refresh_all_status_labels();
+    }
+
+    ddata->unref();
+    delete sd;
+    return FALSE;
+}
+
+static gpointer do_sync_thread(gpointer data) {
+    AsyncSyncData *sd = (AsyncSyncData *)data;
     KykkyNetwork &net = KykkyNetwork::instance();
+
     if (!net.check_internet()) {
-        gtk_label_set_text(GTK_LABEL(lbl), "正在尝试开启网络...");
-        while (gtk_events_pending()) gtk_main_iteration();
+        // 尝试开启 WiFi
         net.ensure_wifi_on();
-        
-        // 简单重试等待
+
+        // 等待网络连通
         int retries = 5;
         bool connected = false;
-        while(retries-- > 0) {
-            sleep(1);
-            if(net.check_internet()) {
+        while (retries-- > 0) {
+            g_usleep(1000000); // 1 秒
+            if (net.check_internet()) {
                 connected = true;
                 break;
             }
         }
-        
+
         if (!connected) {
-            gtk_label_set_text(GTK_LABEL(lbl), "网络连接失败，请检查 WiFi");
-            return;
+            sd->error = "no_network";
+            g_idle_add(do_sync_done_idle, sd);
+            return NULL;
         }
     }
 
-    gtk_label_set_text(GTK_LABEL(lbl), "正在上传数据...");
-    while (gtk_events_pending()) gtk_main_iteration();
-
-    std::string err = net.upload_data(g_stats.today_seconds, g_stats.month_seconds);
-    if (err.empty()) {
-        gtk_label_set_text(GTK_LABEL(lbl), "同步成功！");
-        refresh_all_status_labels(); 
-    } else {
-        std::string msg = "同步失败: " + err;
-        gtk_label_set_text(GTK_LABEL(lbl), msg.c_str());
-    }
+    sd->error = net.upload_data(sd->today_seconds, sd->month_seconds);
+    g_idle_add(do_sync_done_idle, sd);
+    return NULL;
 }
 
-static void on_logout_confirm(GtkWidget *widget, gpointer dialog_ptr) {
-    GtkWidget *dialog = GTK_WIDGET(dialog_ptr);
-    KykkyNetwork &net = KykkyNetwork::instance();
-    
+static void on_do_sync(GtkButton *btn, gpointer user_data) {
+    SyncDialogData *ddata = (SyncDialogData *)user_data;
+    if (ddata->sync_in_progress) return;
+    ddata->sync_in_progress = TRUE;
+
+    gtk_widget_set_sensitive(GTK_WIDGET(btn), FALSE);
+    gtk_label_set_text(GTK_LABEL(ddata->lbl_status),
+        "  正在连接服务器...  ");
+
+    ddata->ref();
+    AsyncSyncData *sd = new AsyncSyncData();
+    sd->ddata = ddata;
+    sd->today_seconds = g_stats.today_seconds;
+    sd->month_seconds = g_stats.month_seconds;
+    sd->btn = GTK_WIDGET(btn);
+
+    spawn_detached_thread(do_sync_thread, sd);
+}
+
+// ---- 异步注销 ----
+
+static gboolean logout_done_idle(gpointer data) {
+    AsyncLogoutData *ld = (AsyncLogoutData *)data;
+    SyncDialogData *ddata = ld->ddata;
+
+    if (ddata->alive) {
+        if (ld->success) {
+            refresh_all_status_labels();
+            // 通过 response 关闭对话框，避免 double-destroy
+            gtk_dialog_response(GTK_DIALOG(ddata->dialog), GTK_RESPONSE_CLOSE);
+        } else {
+            if (ld->btn) gtk_widget_set_sensitive(ld->btn, TRUE);
+            if (ddata->btn_sync) gtk_widget_set_sensitive(ddata->btn_sync, TRUE);
+            gtk_label_set_text(GTK_LABEL(ddata->lbl_status),
+                "  注销失败，请检查网络  \n  或使用「强制注销」  ");
+        }
+    }
+
+    ddata->unref();
+    delete ld;
+    return FALSE;
+}
+
+static gpointer logout_thread(gpointer data) {
+    AsyncLogoutData *ld = (AsyncLogoutData *)data;
+    ld->success = KykkyNetwork::instance().logout();
+    g_idle_add(logout_done_idle, ld);
+    return NULL;
+}
+
+static void on_logout_clicked(GtkWidget *widget, gpointer user_data) {
+    SyncDialogData *ddata = (SyncDialogData *)user_data;
+
     gtk_widget_set_sensitive(widget, FALSE);
-    
-    if (net.logout()) {
-        refresh_all_status_labels();
-        gtk_widget_destroy(dialog);
-    } else {
-        gtk_widget_set_sensitive(widget, TRUE);
-        GtkWidget *msg = gtk_message_dialog_new(GTK_WINDOW(dialog),
-                            GTK_DIALOG_MODAL, GTK_MESSAGE_ERROR, GTK_BUTTONS_OK,
-                            "注销失败，请检查网络连接并重试");
-        gtk_dialog_run(GTK_DIALOG(msg));
-        gtk_widget_destroy(msg);
-    }
+    if (ddata->btn_sync) gtk_widget_set_sensitive(ddata->btn_sync, FALSE);
+    gtk_label_set_text(GTK_LABEL(ddata->lbl_status), "  正在注销...  ");
+
+    ddata->ref();
+    AsyncLogoutData *ld = new AsyncLogoutData();
+    ld->ddata = ddata;
+    ld->btn = widget;
+    ld->success = false;
+
+    spawn_detached_thread(logout_thread, ld);
 }
+
+// 强制注销 (不需要网络)
+static void on_force_logout(GtkWidget *widget, gpointer user_data) {
+    SyncDialogData *ddata = (SyncDialogData *)user_data;
+    KykkyNetwork::instance().clear_local_auth();
+    refresh_all_status_labels();
+    gtk_dialog_response(GTK_DIALOG(ddata->dialog), GTK_RESPONSE_CLOSE);
+}
+
+// ---- 异步获取二维码 ----
+
+static gboolean fetch_qr_done_idle(gpointer data) {
+    AsyncQRData *qd = (AsyncQRData *)data;
+    SyncDialogData *ddata = qd->ddata;
+
+    if (ddata->alive) {
+        if (qd->login_url.empty()) {
+            std::string msg = "  获取登录信息失败  ";
+            if (!qd->error.empty()) {
+                msg += "\n  (" + qd->error + ")  ";
+            }
+            gtk_label_set_text(GTK_LABEL(ddata->lbl_status), msg.c_str());
+        } else {
+            ddata->pending_device_code = qd->device_code;
+
+            GtkWidget *qr_img = create_qr_widget(qd->login_url);
+            gtk_box_pack_start(GTK_BOX(ddata->vbox), qr_img, TRUE, TRUE, 10);
+            // 把二维码放在标题后面（位置1），状态label之前
+            gtk_box_reorder_child(GTK_BOX(ddata->vbox), qr_img, 1);
+
+            gtk_label_set_text(GTK_LABEL(ddata->lbl_status),
+                "    请使用手机浏览器扫描    ");
+
+            gtk_widget_show_all(ddata->vbox);
+
+            // 启动轮询定时器 (3秒一次)
+            ddata->ref(); // timer 引用
+            ddata->poll_timer_id = g_timeout_add(3000, on_poll_login, ddata);
+        }
+    }
+
+    ddata->unref(); // thread 引用
+    delete qd;
+    return FALSE;
+}
+
+static gpointer fetch_qr_thread(gpointer data) {
+    AsyncQRData *qd = (AsyncQRData *)data;
+    auto qr_info = KykkyNetwork::instance().fetch_login_qr();
+    qd->login_url = qr_info.first;
+    qd->device_code = qr_info.second;
+    if (qd->login_url.empty()) {
+        qd->error = KykkyNetwork::instance().get_last_error();
+    }
+    g_idle_add(fetch_qr_done_idle, qd);
+    return NULL;
+}
+
+// ---- 异步网络检查 (用于离线快速同步QR) ----
+
+static gboolean check_net_done_idle(gpointer data) {
+    AsyncCheckNetData *cn = (AsyncCheckNetData *)data;
+    SyncDialogData *ddata = cn->ddata;
+
+    if (ddata->alive && !cn->online && ddata->offline_container) {
+        KykkyNetwork &net = KykkyNetwork::instance();
+
+        GtkWidget *sep = gtk_hseparator_new();
+        gtk_box_pack_start(GTK_BOX(ddata->offline_container), sep, FALSE, FALSE, 5);
+
+        GtkWidget *lbl_offline = gtk_label_new("  当前无网络，可扫码快速同步  ");
+        gtk_box_pack_start(GTK_BOX(ddata->offline_container), lbl_offline, FALSE, FALSE, 5);
+
+        std::string json_data = "{\"did\":\"" + net.get_device_code() + "\",\"today\":"
+                            + std::to_string(g_stats.today_seconds) + ",\"month\":"
+                            + std::to_string(g_stats.month_seconds) + "}";
+
+        std::string b64 = base64_encode(json_data);
+        std::string fast_url = "https://" + g_share_domain + "/fastsync.php?data=" + b64;
+
+        GtkWidget *fast_qr = create_qr_widget(fast_url);
+        gtk_box_pack_start(GTK_BOX(ddata->offline_container), fast_qr, FALSE, FALSE, 5);
+
+        gtk_widget_show_all(ddata->offline_container);
+
+        gtk_label_set_text(GTK_LABEL(ddata->lbl_status), "  当前离线  ");
+    }
+
+    ddata->unref();
+    delete cn;
+    return FALSE;
+}
+
+static gpointer check_net_thread(gpointer data) {
+    AsyncCheckNetData *cn = (AsyncCheckNetData *)data;
+    cn->online = KykkyNetwork::instance().check_internet();
+    g_idle_add(check_net_done_idle, cn);
+    return NULL;
+}
+
+// ---- 主对话框入口 ----
 
 void on_cloud_sync_clicked(GtkButton *btn, gpointer data) {
     SyncDialogData *ddata = new SyncDialogData();
-    ddata->poll_timer_id = 0;
 
     GtkWidget *dialog = gtk_dialog_new_with_buttons(
-        "L:D_N:dialog_PC:T_ID:net.tqhyg.reading.dialog", 
-        NULL, 
-        GTK_DIALOG_MODAL, 
-        "关闭", GTK_RESPONSE_CLOSE, 
+        "L:D_N:dialog_PC:T_ID:net.tqhyg.reading.dialog",
+        NULL,
+        GTK_DIALOG_MODAL,
+        "关闭", GTK_RESPONSE_CLOSE,
         NULL
     );
     ddata->dialog = dialog;
-    
+
     GtkWidget *content_area = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
-    
+    ddata->content_area = content_area;
+
     KykkyNetwork &net = KykkyNetwork::instance();
     bool logged_in = net.get_user_info().is_logged_in;
 
     GtkWidget *vbox = gtk_vbox_new(FALSE, 10);
+    ddata->vbox = vbox;
     gtk_container_add(GTK_CONTAINER(content_area), vbox);
 
-    // 状态标签
+    // 状态标签 (所有网络操作状态均显示在这里)
     ddata->lbl_status = gtk_label_new("");
-    
+
     if (!logged_in) {
         // --- 未登录界面 ---
         GtkWidget *lbl_title = gtk_label_new("    请扫描下方二维码登录    ");
         PangoFontDescription *font_lg = pango_font_description_from_string("Sans Bold 12");
         gtk_widget_modify_font(lbl_title, font_lg);
+        pango_font_description_free(font_lg);
         gtk_box_pack_start(GTK_BOX(vbox), lbl_title, FALSE, FALSE, 10);
 
-        // 获取二维码
-        std::pair<std::string, std::string> qr_info = net.fetch_login_qr();
-        if (qr_info.first.empty()) {
-             gtk_label_set_text(GTK_LABEL(ddata->lbl_status), "  获取二维码失败，请检查网络  ");
-        } else {
-            ddata->pending_device_code = qr_info.second;
-            
-            GtkWidget *qr_img = create_qr_widget(qr_info.first);
-            gtk_box_pack_start(GTK_BOX(vbox), qr_img, TRUE, TRUE, 10);
-            
-            gtk_label_set_text(GTK_LABEL(ddata->lbl_status), "    请使用手机浏览器扫描    ");
-            
-            // 启动轮询 (3秒一次)
-            ddata->poll_timer_id = g_timeout_add(3000, on_poll_login, ddata);
-        }
+        // 先显示状态标签（加载中提示）
+        gtk_label_set_text(GTK_LABEL(ddata->lbl_status),
+            "  正在获取登录信息...  ");
+        gtk_box_pack_start(GTK_BOX(vbox), ddata->lbl_status, FALSE, FALSE, 10);
+
+        // 异步获取二维码（不阻塞UI）
+        ddata->ref(); // thread 引用
+        AsyncQRData *qd = new AsyncQRData();
+        qd->ddata = ddata;
+        spawn_detached_thread(fetch_qr_thread, qd);
+
     } else {
         // --- 已登录界面 ---
         std::string user_info_str = "    账号: " + (net.get_user_info().nickname.empty() ? "User" : net.get_user_info().nickname);
@@ -374,11 +694,11 @@ void on_cloud_sync_clicked(GtkButton *btn, gpointer data) {
             user_info_str += "\n    设备: " + net.get_user_info().device_name;
         }
         GtkWidget *lbl_user = gtk_label_new(user_info_str.c_str());
-        // 设置为左对齐
-        gtk_misc_set_alignment(GTK_MISC(lbl_user), 0, 0.5); 
-        
+        gtk_misc_set_alignment(GTK_MISC(lbl_user), 0, 0.5);
+
         PangoFontDescription *font_lg = pango_font_description_from_string("Sans Bold 12");
         gtk_widget_modify_font(lbl_user, font_lg);
+        pango_font_description_free(font_lg);
         gtk_box_pack_start(GTK_BOX(vbox), lbl_user, FALSE, FALSE, 10);
 
         // 上次同步时间
@@ -396,10 +716,10 @@ void on_cloud_sync_clicked(GtkButton *btn, gpointer data) {
         gtk_box_pack_start(GTK_BOX(vbox), vbtn_box, FALSE, FALSE, 0);
 
         auto make_halfwidth_button = [&](const char *text) {
-            GtkWidget *align = gtk_alignment_new(0.5, 0.5, 0, 0);  
+            GtkWidget *align = gtk_alignment_new(0.5, 0.5, 0, 0);
 
             GtkWidget *btn = gtk_button_new_with_label(text);
-            gtk_widget_set_size_request(btn, 300, 60); 
+            gtk_widget_set_size_request(btn, 300, 60);
 
             gtk_container_add(GTK_CONTAINER(align), btn);
             return align;
@@ -407,42 +727,46 @@ void on_cloud_sync_clicked(GtkButton *btn, gpointer data) {
 
         // 立即同步
         GtkWidget *sync_align = make_halfwidth_button("立即同步");
-        g_signal_connect(G_OBJECT(gtk_bin_get_child(GTK_BIN(sync_align))), 
-                        "clicked", G_CALLBACK(on_do_sync), ddata->lbl_status);
+        GtkWidget *sync_btn = gtk_bin_get_child(GTK_BIN(sync_align));
+        ddata->btn_sync = sync_btn;
+        g_signal_connect(G_OBJECT(sync_btn),
+                        "clicked", G_CALLBACK(on_do_sync), ddata);
         gtk_box_pack_start(GTK_BOX(vbtn_box), sync_align, FALSE, FALSE, 0);
 
         // 注销登录
         GtkWidget *logout_align = make_halfwidth_button("注销登录");
-        g_signal_connect(G_OBJECT(gtk_bin_get_child(GTK_BIN(logout_align))), 
-                        "clicked", G_CALLBACK(on_logout_confirm), dialog);
+        GtkWidget *logout_btn = gtk_bin_get_child(GTK_BIN(logout_align));
+        ddata->btn_logout = logout_btn;
+        g_signal_connect(G_OBJECT(logout_btn),
+                        "clicked", G_CALLBACK(on_logout_clicked), ddata);
         gtk_box_pack_start(GTK_BOX(vbtn_box), logout_align, FALSE, FALSE, 0);
+
+        // 强制注销 (离线可用)
+        GtkWidget *force_align = make_halfwidth_button("强制注销(离线)");
+        g_signal_connect(G_OBJECT(gtk_bin_get_child(GTK_BIN(force_align))),
+                        "clicked", G_CALLBACK(on_force_logout), ddata);
+        gtk_box_pack_start(GTK_BOX(vbtn_box), force_align, FALSE, FALSE, 0);
 
         GtkWidget *sep = gtk_hseparator_new();
         gtk_box_pack_start(GTK_BOX(vbox), sep, FALSE, FALSE, 10);
 
-        // 离线/FastSync 二维码
-        // 逻辑：如果没网，显示快速同步码。
-        if (!net.check_internet()) {
-            GtkWidget *lbl_offline = gtk_label_new("当前无网络，可扫码快速同步");
-            gtk_box_pack_start(GTK_BOX(vbox), lbl_offline, FALSE, FALSE, 5);
-            
-            // 构建 JSON 并 Base64
-            std::string json_data = "{\"did\":\"" + net.get_device_code() + "\",\"today\":" 
-                                + std::to_string(g_stats.today_seconds) + ",\"month\":" 
-                                + std::to_string(g_stats.month_seconds) + "}";
-            
-            std::string b64 = base64_encode(json_data);
-            std::string fast_url = "https://" + g_share_domain + "/fastsync.php?data=" + b64;
-            
-            GtkWidget *fast_qr = create_qr_widget(fast_url); 
-            gtk_box_pack_start(GTK_BOX(vbox), fast_qr, FALSE, FALSE, 5);
-        }
+        // 离线同步区容器 (异步检查后填充)
+        ddata->offline_container = gtk_vbox_new(FALSE, 5);
+        gtk_box_pack_start(GTK_BOX(vbox), ddata->offline_container, FALSE, FALSE, 0);
+
+        // 状态标签
+        gtk_box_pack_start(GTK_BOX(vbox), ddata->lbl_status, FALSE, FALSE, 10);
+
+        // 异步检查网络状态（不阻塞UI）
+        ddata->ref();
+        AsyncCheckNetData *cn = new AsyncCheckNetData();
+        cn->ddata = ddata;
+        cn->online = false;
+        spawn_detached_thread(check_net_thread, cn);
     }
-    
-    gtk_box_pack_start(GTK_BOX(vbox), ddata->lbl_status, FALSE, FALSE, 10);
-    
+
     g_signal_connect(G_OBJECT(dialog), "destroy", G_CALLBACK(on_dialog_destroy), ddata);
-    
+
     gtk_widget_show_all(dialog);
     gtk_dialog_run(GTK_DIALOG(dialog));
     gtk_widget_destroy(dialog);

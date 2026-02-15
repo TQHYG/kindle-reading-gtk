@@ -32,5 +32,7 @@ executable(
   include_directories: include_dirs,
   dependencies: [gtk_dep, curl_dep],
   cpp_args: '-static-libstdc++',
-  link_args: ['-static-libstdc++', '-Wl,-rpath=./']
+  link_args: ['-static-libstdc++', '-pthread'],
+  build_rpath: './',
+  install_rpath: './:/mnt/us/extensions/kykky/bin'
   )
