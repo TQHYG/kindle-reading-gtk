@@ -59,6 +59,14 @@ gboolean draw_month_view(GtkWidget *widget, GdkEventExpose *event, gpointer data
     int month = g_stats.month_month;
     int days = g_stats.month_day_seconds.size();
 
+    // 获取今天日期以作高亮
+    time_t now = time(NULL);
+    struct tm tm_now;
+    localtime_r(&now, &tm_now);
+    int today_year = tm_now.tm_year + 1900;
+    int today_month = tm_now.tm_mon + 1;
+    int today_day = tm_now.tm_mday;
+
     struct tm tmv;
     memset(&tmv, 0, sizeof(tmv));
     tmv.tm_year = year - 1900;
@@ -79,6 +87,7 @@ gboolean draw_month_view(GtkWidget *widget, GdkEventExpose *event, gpointer data
         }
     }
 
+    double today_rect_x = -1, today_rect_y = -1;
     for (int d = 1; d <= days; d++) {
         int idx = d - 1;
         int off = first_col + idx;
@@ -111,12 +120,18 @@ gboolean draw_month_view(GtkWidget *widget, GdkEventExpose *event, gpointer data
         } else {
             cairo_set_source_rgb(cr, 0, 0, 0); // 黑字
         }
-        
+
         // 绘制边框（黑色）
         cairo_set_source_rgb(cr, 0, 0, 0);
+        cairo_set_line_width(cr, 1.0); // 普通边框
         cairo_rectangle(cr, x, y, cw, ch);
         cairo_stroke(cr);
         
+        if (year == today_year && month == today_month && d == today_day) {
+            today_rect_x = x;
+            today_rect_y = y;
+        }
+
         // 恢复文字颜色
         if (gray < 0.5) {
             cairo_set_source_rgb(cr, 1, 1, 1);
@@ -134,6 +149,14 @@ gboolean draw_month_view(GtkWidget *widget, GdkEventExpose *event, gpointer data
         cairo_set_font_size(cr, 32);
         cairo_move_to(cr, x + 10, y + 90);
         cairo_show_text(cr, buf);
+    }
+
+    if (today_rect_x >= 0 && today_rect_y >= 0) {
+        cairo_set_source_rgb(cr, 0, 0, 0);
+        cairo_set_line_width(cr, 5.0);
+        cairo_rectangle(cr, today_rect_x, today_rect_y, cw, ch);
+        cairo_stroke(cr);
+        cairo_set_line_width(cr, 1.0);
     }
 
     char month_total_str[64];
