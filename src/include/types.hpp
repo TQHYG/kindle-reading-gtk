@@ -71,6 +71,7 @@ extern const int MAX_TARGET_MINUTES;
 // 声明全局变量
 extern int g_daily_target_minutes;
 extern std::string g_share_domain;
+extern std::string g_share_scheme;
 extern GdkColor white;
 extern GdkColor gray;
 

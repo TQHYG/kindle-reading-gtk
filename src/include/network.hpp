@@ -59,6 +59,8 @@ private:
     std::string access_token;
     std::string device_code;
     std::string domain;
+
+    std::string baseUrl() const;
     UserInfo current_user;
     time_t last_sync_time = 0;
     std::string last_error_;

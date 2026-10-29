@@ -5,7 +5,7 @@
 
 // 生成分享URL
 std::string generate_share_url() {
-    std::string url = "https://" + g_share_domain + "/share.php?";
+    std::string url = share_base_url() + "/share.html?";
     
     // 添加年月和目标
     char buf[64];

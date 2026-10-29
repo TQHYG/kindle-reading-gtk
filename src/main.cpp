@@ -55,6 +55,7 @@ const char* APP_TITLE = "L:A_N:application_PC:T_ID:net.tqhyg.reading";
 // 全局变量
 int g_daily_target_minutes = DEFAULT_TARGET_MINUTES;
 std::string g_share_domain = "reading.tqhyg.net";
+std::string g_share_scheme = "https";
 
 GdkColor white = {0, 0xffff, 0xffff, 0xffff};
 GdkColor gray = {0, 0x8888, 0x8888, 0x8888};

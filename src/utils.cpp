@@ -68,6 +68,17 @@ void format_hms(long sec, char *buf, size_t sz) {
     snprintf(buf, sz, "%4ldH %02ldm %02lds", h, m, s);
 }
 
+static std::string trim_config_value(const std::string& value) {
+    size_t begin = value.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) return "";
+    size_t end = value.find_last_not_of(" \t\r\n");
+    return value.substr(begin, end - begin + 1);
+}
+
+static bool is_valid_scheme(const std::string& scheme) {
+    return scheme == "http" || scheme == "https";
+}
+
 void save_target_config() {
     // 确保目录存在
     std::string dir = CONFIG_FILE.substr(0, CONFIG_FILE.find_last_of('/'));
@@ -76,7 +87,8 @@ void save_target_config() {
     FILE *fp = fopen(CONFIG_FILE.c_str(), "w");
     if (fp) {
         fprintf(fp, "daily_target_minutes=%d\n", g_daily_target_minutes);
-        fprintf(fp, "share_domain=%s\n", g_share_domain.c_str()); 
+        fprintf(fp, "share_domain=%s\n", g_share_domain.c_str());
+        fprintf(fp, "share_scheme=%s\n", g_share_scheme.c_str());
         fclose(fp);
     }
 }
@@ -85,6 +97,7 @@ void load_target_config() {
     // 首先设置默认值
     g_daily_target_minutes = DEFAULT_TARGET_MINUTES;
     g_share_domain = "reading.tqhyg.net";
+    g_share_scheme = "https";
     
     FILE *fp = fopen(CONFIG_FILE.c_str(), "r");
     if (!fp) {
@@ -97,6 +110,7 @@ void load_target_config() {
     char line[512];
     bool has_target = false;
     bool has_domain = false;
+    bool has_scheme = false;
     
     while (fgets(line, sizeof(line), fp)) {
         // 移除换行符
@@ -113,22 +127,48 @@ void load_target_config() {
             }
             has_target = true;
         }
-        // 解析分享域名
+        // 解析分享/API 域名，允许直接写完整 URL
         else if (strncmp(line, "share_domain=", 13) == 0) {
-            std::string domain = line + 13;
+            std::string domain = trim_config_value(line + 13);
+            size_t scheme_pos = domain.find("://");
+            if (scheme_pos != std::string::npos) {
+                std::string scheme = domain.substr(0, scheme_pos);
+                std::transform(scheme.begin(), scheme.end(), scheme.begin(), ::tolower);
+                if (is_valid_scheme(scheme)) {
+                    g_share_scheme = scheme;
+                    has_scheme = true;
+                }
+                domain = domain.substr(scheme_pos + 3);
+            }
+            while (!domain.empty() && domain.back() == '/') {
+                domain.pop_back();
+            }
             if (!domain.empty()) {
                 g_share_domain = domain;
             }
             has_domain = true;
+        }
+        // 显式指定协议，兼容不含协议的域名
+        else if (strncmp(line, "share_scheme=", 13) == 0) {
+            std::string scheme = trim_config_value(line + 13);
+            std::transform(scheme.begin(), scheme.end(), scheme.begin(), ::tolower);
+            if (is_valid_scheme(scheme)) {
+                g_share_scheme = scheme;
+            }
+            has_scheme = true;
         }
     }
     
     fclose(fp);
     
     // 如果配置项缺失，补全配置
-    if (!has_target || !has_domain) {
+    if (!has_target || !has_domain || !has_scheme) {
         save_target_config();
     }
+}
+
+std::string share_base_url() {
+    return g_share_scheme + "://" + g_share_domain;
 }
 
 

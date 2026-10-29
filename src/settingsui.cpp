@@ -619,7 +619,7 @@ static gboolean check_net_done_idle(gpointer data) {
                             + std::to_string(g_stats.month_seconds) + "}";
 
         std::string b64 = base64_encode(json_data);
-        std::string fast_url = "https://" + g_share_domain + "/fastsync.php?data=" + b64;
+        std::string fast_url = share_base_url() + "/fastsync.html?data=" + b64;
 
         GtkWidget *fast_qr = create_qr_widget(fast_url);
         gtk_box_pack_start(GTK_BOX(ddata->offline_container), fast_qr, FALSE, FALSE, 5);
@@ -713,7 +713,6 @@ void on_cloud_sync_clicked(GtkButton *btn, gpointer data) {
         GtkWidget *vbtn_box = gtk_vbox_new(FALSE, 10);
         gtk_container_add(GTK_CONTAINER(outer_align), vbtn_box);
         gtk_alignment_set_padding(GTK_ALIGNMENT(outer_align), 0, 0, 100, 100);
-        gtk_box_pack_start(GTK_BOX(vbox), vbtn_box, FALSE, FALSE, 0);
 
         auto make_halfwidth_button = [&](const char *text) {
             GtkWidget *align = gtk_alignment_new(0.5, 0.5, 0, 0);

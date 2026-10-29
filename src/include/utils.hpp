@@ -19,6 +19,9 @@ void refresh_all_status_labels();
 
 std::string base64_encode(const std::string& in);
 
+// 当前配置的分享/API 根地址（scheme://domain）
+std::string share_base_url();
+
 // 配置管理
 void save_target_config();
 void load_target_config();

@@ -11,6 +11,8 @@
 #include <dirent.h>
 #include <cstring>
 #include <cstdint>
+#include <cstdio>
+#include <algorithm>
 
 #define MY_USER_AGENT "Mozilla/5.0 (Linux; Android 4.4.2; Kindle Fire Build/KOT49H) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/30.0.0.0 Safari/537.36"
 
@@ -48,11 +50,17 @@ std::string unescape_unicode(const std::string& input) {
 
 // 保存状态：sync_time, nickname, device_name
 void KykkyNetwork::save_state() {
-    std::ofstream outfile(STATE_FILE);
+    const std::string tmp_path = STATE_FILE + ".tmp";
+    std::ofstream outfile(tmp_path);
     if (outfile.good()) {
         outfile << "last_sync=" << last_sync_time << "\n";
         outfile << "nickname=" << current_user.nickname << "\n";
         outfile << "devicename=" << current_user.device_name << "\n";
+        outfile.close();
+        chmod(tmp_path.c_str(), 0600);
+        if (rename(tmp_path.c_str(), STATE_FILE.c_str()) != 0) {
+            unlink(tmp_path.c_str());
+        }
     }
 }
 
@@ -91,7 +99,7 @@ bool KykkyNetwork::fetch_user_profile() {
     if (this->device_code.empty()) return false;
 
     // 利用 check_status 接口获取信息
-    std::string url = "https://" + domain + "/api/auth.php?action=check_status&device_code=" + this->device_code;
+    std::string url = baseUrl() + "/api/auth.php?action=check_status&device_code=" + this->device_code;
     
     std::cout << "[Network] Fetching profile: " << url << std::endl;
     std::string json = http_get(url);
@@ -130,13 +138,30 @@ void KykkyNetwork::init() {
     if (g_share_domain.empty()) {
         g_share_domain = "reading.tqhyg.net";
     }
-    if (g_share_domain.find("://") != std::string::npos) {
-        g_share_domain = g_share_domain.substr(g_share_domain.find("://") + 3);
+    // 兼容 share_domain 直接写成完整 URL 的旧配置
+    size_t scheme_pos = g_share_domain.find("://");
+    if (scheme_pos != std::string::npos) {
+        std::string scheme = g_share_domain.substr(0, scheme_pos);
+        std::transform(scheme.begin(), scheme.end(), scheme.begin(), ::tolower);
+        if (scheme == "http" || scheme == "https") {
+            g_share_scheme = scheme;
+        }
+        g_share_domain = g_share_domain.substr(scheme_pos + 3);
+    }
+    while (!g_share_domain.empty() && g_share_domain.back() == '/') {
+        g_share_domain.pop_back();
+    }
+    if (g_share_scheme != "http" && g_share_scheme != "https") {
+        g_share_scheme = "https";
     }
     this->domain = g_share_domain;
     
     load_token(); // 加载认证信息
     load_state(); // 加载昵称、同步时间等缓存
+}
+
+std::string KykkyNetwork::baseUrl() const {
+    return g_share_scheme + "://" + domain;
 }
 
 // 简易 JSON 提取，不依赖大库
@@ -179,7 +204,6 @@ std::string KykkyNetwork::http_get(const std::string& url) {
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-        curl_easy_setopt(curl, CURLOPT_USERAGENT, "Kykky-Kindle-Client/1.0");
 
         // 带上认证 header
         struct curl_slist *headers = NULL;
@@ -302,14 +326,14 @@ bool KykkyNetwork::check_internet() {
 
     curl = curl_easy_init();
     if(curl) {
-        std::string url = "http://" + domain + "/style.css";
+        std::string url = baseUrl() + "/style.css";
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 3L);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
         curl_easy_setopt(curl, CURLOPT_NOBODY, 1L); // HEAD 请求，更快
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-        curl_easy_setopt(curl, CURLOPT_USERAGENT, "Kykky-Kindle-Client/1.0");
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, MY_USER_AGENT);
 
         res = curl_easy_perform(curl);
         curl_easy_cleanup(curl);
@@ -377,7 +401,7 @@ bool KykkyNetwork::logout() {
     if (!check_internet()) return false;
 
     // 3. 构造请求 (带上 device_code 以便服务端识别设备)
-    std::string url = "https://" + domain + "/api/auth.php?action=logout&device_code=" + this->device_code;
+    std::string url = baseUrl() + "/api/auth.php?action=logout&device_code=" + this->device_code;
     
     std::string resp = http_get(url);
     std::string status = extract_json_value(resp, "status");
@@ -391,17 +415,23 @@ bool KykkyNetwork::logout() {
 }
 
 void save_token_file(const std::string& dc, const std::string& at) {
-    std::ofstream outfile(TOKEN_FILE_PATH);
+    const std::string tmp_path = TOKEN_FILE_PATH + ".tmp";
+    std::ofstream outfile(tmp_path);
     if (outfile.good()) {
         outfile << dc << "\n";
         outfile << at << "\n";
+        outfile.close();
+        chmod(tmp_path.c_str(), 0600);
+        if (rename(tmp_path.c_str(), TOKEN_FILE_PATH.c_str()) != 0) {
+            unlink(tmp_path.c_str());
+        }
     }
 }
 
 // —— 业务逻辑 ——
 
 std::pair<std::string, std::string> KykkyNetwork::fetch_login_qr() {
-    std::string url = "https://" + domain + "/api/auth.php?action=get_url";
+    std::string url = baseUrl() + "/api/auth.php?action=get_url";
     std::cout << "[Network] QR Req: " << url << std::endl; // 调试输出
     
     std::string json = http_get(url);
@@ -438,7 +468,7 @@ std::pair<std::string, std::string> KykkyNetwork::fetch_login_qr() {
 }
 
 std::string KykkyNetwork::poll_login_status(const std::string& d_code) {
-    std::string url = "https://" + domain + "/api/auth.php?action=check_status&device_code=" + d_code;
+    std::string url = baseUrl() + "/api/auth.php?action=check_status&device_code=" + d_code;
     std::string json = http_get(url);
     
     std::string status = extract_json_value(json, "status");
@@ -468,7 +498,7 @@ std::string KykkyNetwork::poll_login_status(const std::string& d_code) {
 std::string KykkyNetwork::upload_data(long today, long month) {
     // ---上传前的身份有效性预检 ---
     if (!this->access_token.empty()) {
-        std::string check_url = "https://" + domain + "/api/auth.php?action=check_status&device_code=" + this->device_code;
+        std::string check_url = baseUrl() + "/api/auth.php?action=check_status&device_code=" + this->device_code;
         std::string resp = http_get(check_url);
         
         // 如果服务端返回 expired，说明设备已在后台被删
@@ -480,7 +510,7 @@ std::string KykkyNetwork::upload_data(long today, long month) {
         }
     }
 
-    std::string url = "https://" + domain + "/api/upload.php";
+    std::string url = baseUrl() + "/api/upload.php";
     std::vector<std::string> files;
 
     // 1. metrics_reader_xxxx (当前)
