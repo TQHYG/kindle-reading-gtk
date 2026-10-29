@@ -32,14 +32,7 @@ share_domain=reading.tqhyg.net
 share_scheme=https
 ```
 
-本地联调：
-
-```ini
-share_domain=127.0.0.1:8080
-share_scheme=http
-```
-
-`share_domain` 也可以直接写成完整 URL（如 `http://127.0.0.1:8080`），客户端会自动解析协议。修改后重启应用生效。
+`share_domain` 也可以直接写成完整 URL，客户端会自动解析协议。修改后重启应用生效。
 
 客户端会使用配置的协议/域名请求：
 
