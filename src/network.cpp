@@ -38,7 +38,7 @@ std::string unescape_unicode(const std::string& input) {
                 output += (char)(0x80 | ((cp >> 6) & 0x3F));
                 output += (char)(0x80 | (cp & 0x3F));
             }
-            i += 5; 
+            i += 5;
         } else {
             output += input[i];
         }
@@ -100,7 +100,7 @@ bool KykkyNetwork::fetch_user_profile() {
 
     // 利用 check_status 接口获取信息
     std::string url = baseUrl() + "/api/auth.php?action=check_status&device_code=" + this->device_code;
-    
+
     std::cout << "[Network] Fetching profile: " << url << std::endl;
     std::string json = http_get(url);
 
@@ -110,10 +110,10 @@ bool KykkyNetwork::fetch_user_profile() {
     if (status == "success") {
         std::string nick = unescape_unicode(extract_json_value(json, "nickname"));
         std::string dname = unescape_unicode(extract_json_value(json, "device_name"));
-        
+
         if (!nick.empty()) current_user.nickname = nick;
         if (!dname.empty()) current_user.device_name = dname;
-        
+
         current_user.is_logged_in = true;
         save_state(); // 获取成功后立即保存
         return true;
@@ -127,6 +127,14 @@ static size_t WriteCallback(void *contents, size_t size, size_t nmemb, void *use
     return size * nmemb;
 }
 
+static long curl_response_code(CURL *curl) {
+    long code = 0;
+    if (curl != NULL) {
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    }
+    return code;
+}
+
 KykkyNetwork& KykkyNetwork::instance() {
     static KykkyNetwork inst;
     return inst;
@@ -134,7 +142,7 @@ KykkyNetwork& KykkyNetwork::instance() {
 
 void KykkyNetwork::init() {
     curl_global_init(CURL_GLOBAL_DEFAULT);
-    
+
     if (g_share_domain.empty()) {
         g_share_domain = "reading.tqhyg.net";
     }
@@ -155,7 +163,7 @@ void KykkyNetwork::init() {
         g_share_scheme = "https";
     }
     this->domain = g_share_domain;
-    
+
     load_token(); // 加载认证信息
     load_state(); // 加载昵称、同步时间等缓存
 }
@@ -193,6 +201,7 @@ std::string KykkyNetwork::http_get(const std::string& url) {
     CURLcode res;
     std::string readBuffer;
     last_error_ = "";
+    last_http_status_ = 0;
 
     curl = curl_easy_init();
     if(curl) {
@@ -214,12 +223,18 @@ std::string KykkyNetwork::http_get(const std::string& url) {
         }
 
         res = curl_easy_perform(curl);
+        last_http_status_ = curl_response_code(curl);
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
         if (res != CURLE_OK) {
             last_error_ = curl_easy_strerror(res);
             return "";
         }
+        if (last_http_status_ >= 400) {
+            last_error_ = "HTTP " + std::to_string(last_http_status_);
+        }
+    } else {
+        last_error_ = "Curl init failed";
     }
     return readBuffer;
 }
@@ -229,6 +244,8 @@ std::string KykkyNetwork::http_post(const std::string& url, const std::string& d
     CURL *curl;
     CURLcode res;
     std::string readBuffer;
+    last_error_ = "";
+    last_http_status_ = 0;
 
     curl = curl_easy_init();
     if(curl) {
@@ -251,17 +268,29 @@ std::string KykkyNetwork::http_post(const std::string& url, const std::string& d
         }
 
         res = curl_easy_perform(curl);
+        last_http_status_ = curl_response_code(curl);
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
+        if (res != CURLE_OK) {
+            last_error_ = curl_easy_strerror(res);
+            return "";
+        }
+        if (last_http_status_ >= 400) {
+            last_error_ = "HTTP " + std::to_string(last_http_status_);
+        }
+    } else {
+        last_error_ = "Curl init failed";
     }
     return readBuffer;
 }
 
 // 复杂上传
-std::string KykkyNetwork::http_post_files(const std::string& url, const std::vector<std::string>& file_paths, long today, long month) {
+std::string KykkyNetwork::http_post_files(const std::string& url, const std::vector<std::string>& file_paths, long today, long week, long month, long total) {
     CURL *curl;
     CURLcode res;
     std::string readBuffer;
+    last_error_ = "";
+    last_http_status_ = 0;
 
     struct curl_httppost *formpost = NULL;
     struct curl_httppost *lastptr = NULL;
@@ -280,7 +309,10 @@ std::string KykkyNetwork::http_post_files(const std::string& url, const std::vec
 
     curl = curl_easy_init();
     if(curl) {
-        std::string full_url = url + "?today_seconds=" + std::to_string(today) + "&month_seconds=" + std::to_string(month);
+        std::string full_url = url + "?today_seconds=" + std::to_string(today)
+            + "&week_seconds=" + std::to_string(week)
+            + "&month_seconds=" + std::to_string(month)
+            + "&total_seconds=" + std::to_string(total);
 
         curl_easy_setopt(curl, CURLOPT_URL, full_url.c_str());
         curl_easy_setopt(curl, CURLOPT_USERAGENT, MY_USER_AGENT);
@@ -301,14 +333,19 @@ std::string KykkyNetwork::http_post_files(const std::string& url, const std::vec
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
         res = curl_easy_perform(curl);
+        last_http_status_ = curl_response_code(curl);
 
         curl_slist_free_all(headers);
         curl_easy_cleanup(curl);
         curl_formfree(formpost);
 
-        if (res != CURLE_OK) return "Network Error: " + std::string(curl_easy_strerror(res));
+        if (res != CURLE_OK) {
+            last_error_ = curl_easy_strerror(res);
+            return "Network Error: " + last_error_;
+        }
     } else {
-        return "Curl init failed";
+        last_error_ = "Curl init failed";
+        return last_error_;
     }
 
     // 检查服务端返回
@@ -316,13 +353,18 @@ std::string KykkyNetwork::http_post_files(const std::string& url, const std::vec
     if (status == "success") return ""; // 成功
 
     std::string msg = extract_json_value(readBuffer, "msg");
-    return msg.empty() ? "Unknown server error" : msg;
+    if (msg.empty() && last_http_status_ >= 400) {
+        msg = "HTTP " + std::to_string(last_http_status_);
+    }
+    last_error_ = msg.empty() ? "Unknown server error" : msg;
+    return last_error_;
 }
 
 bool KykkyNetwork::check_internet() {
     CURL *curl;
     CURLcode res;
     last_error_ = "";
+    last_http_status_ = 0;
 
     curl = curl_easy_init();
     if(curl) {
@@ -336,12 +378,16 @@ bool KykkyNetwork::check_internet() {
         curl_easy_setopt(curl, CURLOPT_USERAGENT, MY_USER_AGENT);
 
         res = curl_easy_perform(curl);
+        last_http_status_ = curl_response_code(curl);
         curl_easy_cleanup(curl);
         if (res != CURLE_OK) {
             last_error_ = curl_easy_strerror(res);
+            return false;
         }
-        return (res == CURLE_OK);
+        // 4xx 通常代表服务器可达（包括 WAF 拦截）；5xx 视为服务不可用。
+        return last_http_status_ > 0 && last_http_status_ < 500;
     }
+    last_error_ = "Curl init failed";
     return false;
 }
 
@@ -383,7 +429,7 @@ void KykkyNetwork::clear_local_auth() {
     current_user.is_logged_in = false;
     current_user.nickname = "";
     current_user.device_name = "";
-    
+
     unlink(TOKEN_FILE_PATH.c_str());
     std::string state_path = BASE_DIR + "etc/state";
     unlink(state_path.c_str());
@@ -402,7 +448,7 @@ bool KykkyNetwork::logout() {
 
     // 3. 构造请求 (带上 device_code 以便服务端识别设备)
     std::string url = baseUrl() + "/api/auth.php?action=logout&device_code=" + this->device_code;
-    
+
     std::string resp = http_get(url);
     std::string status = extract_json_value(resp, "status");
 
@@ -433,21 +479,29 @@ void save_token_file(const std::string& dc, const std::string& at) {
 std::pair<std::string, std::string> KykkyNetwork::fetch_login_qr() {
     std::string url = baseUrl() + "/api/auth.php?action=get_url";
     std::cout << "[Network] QR Req: " << url << std::endl; // 调试输出
-    
+
     std::string json = http_get(url);
     std::cout << "[Network] QR Resp: " << json << std::endl; // 调试输出，看服务端返回了什么
 
     if (json.empty()) {
         std::cerr << "[Network Error] Empty response from server" << std::endl;
+        if (last_error_.empty()) {
+            last_error_ = "服务器无响应";
+        }
         return {"", ""};
     }
 
     std::string dc = extract_json_value(json, "device_code");
     std::string lurl = extract_json_value(json, "login_url");
-    
+
     // 调试解析结果
     if (dc.empty() || lurl.empty()) {
         std::cerr << "[Network Error] JSON parse failed. dc=" << dc << " url=" << lurl << std::endl;
+        std::string server_error = extract_json_value(json, "error");
+        if (server_error.empty() && last_http_status_ >= 400) {
+            server_error = "HTTP " + std::to_string(last_http_status_);
+        }
+        last_error_ = server_error.empty() ? "服务器返回数据不完整" : server_error;
         return {"", ""};
     }
 
@@ -463,51 +517,89 @@ std::pair<std::string, std::string> KykkyNetwork::fetch_login_qr() {
         // 保存 device_code 到 token 文件
         save_token_file(dc, "");
     }
-    
+
     return {lurl, dc};
 }
 
 std::string KykkyNetwork::poll_login_status(const std::string& d_code) {
     std::string url = baseUrl() + "/api/auth.php?action=check_status&device_code=" + d_code;
     std::string json = http_get(url);
-    
+    if (json.empty()) {
+        if (last_error_.empty()) {
+            last_error_ = "服务器无响应";
+        }
+        return "";
+    }
+
     std::string status = extract_json_value(json, "status");
+    if (status == "expired") {
+        last_error_ = "登录二维码已过期，请重新获取";
+        return "";
+    }
+    if (status == "error") {
+        std::string msg = extract_json_value(json, "msg");
+        last_error_ = msg.empty() ? "服务器返回错误" : msg;
+        return "";
+    }
     if (status == "success") {
         std::string token = extract_json_value(json, "access_token");
-        if (!token.empty()) {
-            this->access_token = token;
-            
-            // 提取用户信息
-            std::string nick = extract_json_value(json, "nickname");
-            std::string dname = extract_json_value(json, "device_name");
-            
-            this->current_user.nickname = unescape_unicode(extract_json_value(json, "nickname"));
-            this->current_user.device_name = unescape_unicode(extract_json_value(json, "device_name"));
-            this->current_user.is_logged_in = true;
-            
-            save_token_file(this->device_code, this->access_token);
-            save_state(); // 保存用户信息
-            
-            return token;
+        if (token.empty()) {
+            last_error_ = "登录响应缺少 Token";
+            return "";
         }
+
+        this->access_token = token;
+
+        // 提取用户信息
+        this->current_user.nickname = unescape_unicode(extract_json_value(json, "nickname"));
+        this->current_user.device_name = unescape_unicode(extract_json_value(json, "device_name"));
+        this->current_user.is_logged_in = true;
+
+        save_token_file(this->device_code, this->access_token);
+        save_state(); // 保存用户信息
+
+        return token;
     }
+
+    if (status == "pending") {
+        last_error_ = "";
+        return "";
+    }
+
+    last_error_ = status.empty() ? "服务器返回数据异常" : ("服务器返回未知状态: " + status);
     return "";
 }
 
 
-std::string KykkyNetwork::upload_data(long today, long month) {
+std::string KykkyNetwork::upload_data(long today, long week, long month, long total) {
+    if (this->access_token.empty() || this->device_code.empty()) {
+        return "not_logged_in";
+    }
+
     // ---上传前的身份有效性预检 ---
-    if (!this->access_token.empty()) {
-        std::string check_url = baseUrl() + "/api/auth.php?action=check_status&device_code=" + this->device_code;
-        std::string resp = http_get(check_url);
-        
-        // 如果服务端返回 expired，说明设备已在后台被删
-        if (resp.find("expired") != std::string::npos) {
-            std::cout << "[Network] Device expired, skipping upload and clearing local auth." << std::endl;
-            clear_local_auth(); // 清除本地 state 和 token
-            refresh_all_status_labels(); // 刷新 UI 小字
-            return "device_expired"; 
+    std::string check_url = baseUrl() + "/api/auth.php?action=check_status&device_code=" + this->device_code;
+    std::string resp = http_get(check_url);
+
+    if (resp.empty()) {
+        return last_error_.empty() ? "服务器无响应" : ("网络请求失败: " + last_error_);
+    }
+    if (resp.find("expired") != std::string::npos) {
+        std::cout << "[Network] Device expired, skipping upload and clearing local auth." << std::endl;
+        clear_local_auth(); // 清除本地 state 和 token
+        refresh_all_status_labels(); // 刷新 UI 小字
+        return "device_expired";
+    }
+
+    std::string check_status = extract_json_value(resp, "status");
+    if (check_status == "pending") {
+        return "device_not_bound";
+    }
+    if (check_status != "success") {
+        std::string msg = extract_json_value(resp, "msg");
+        if (msg.empty() && last_http_status_ >= 400) {
+            msg = "HTTP " + std::to_string(last_http_status_);
         }
+        return msg.empty() ? "设备校验失败" : msg;
     }
 
     std::string url = baseUrl() + "/api/upload.php";
@@ -530,7 +622,7 @@ std::string KykkyNetwork::upload_data(long today, long month) {
         files.push_back(ARCHIVE_FILE);
     }
 
-    std::string err = http_post_files(url, files, today, month);
+    std::string err = http_post_files(url, files, today, week, month, total);
     if (err.empty()) {
         set_last_sync_time(time(NULL));
     }

@@ -114,7 +114,9 @@ static void on_notebook_switch_page(GtkNotebook *notebook,
 // 启动时后台静默同步
 struct StartupSyncData {
     long today_seconds;
+    long week_seconds;
     long month_seconds;
+    long total_seconds;
 };
 
 static gboolean startup_sync_idle(gpointer data) {
@@ -128,7 +130,7 @@ static gpointer startup_sync_thread(gpointer data) {
     StartupSyncData *sd = (StartupSyncData *)data;
     KykkyNetwork &net = KykkyNetwork::instance();
     if (net.check_internet()) {
-        net.upload_data(sd->today_seconds, sd->month_seconds);
+        net.upload_data(sd->today_seconds, sd->week_seconds, sd->month_seconds, sd->total_seconds);
     }
     g_idle_add(startup_sync_idle, sd);
     return NULL;
@@ -243,7 +245,9 @@ int main(int argc, char *argv[]) {
     if (KykkyNetwork::instance().get_user_info().is_logged_in) {
         StartupSyncData *ssd = new StartupSyncData();
         ssd->today_seconds = g_stats.today_seconds;
+        ssd->week_seconds = g_stats.week_seconds;
         ssd->month_seconds = g_stats.month_seconds;
+        ssd->total_seconds = g_stats.total_seconds;
         spawn_detached_thread(startup_sync_thread, ssd);
     }
 

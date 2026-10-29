@@ -31,6 +31,7 @@ public:
     std::string get_device_code() const { return device_code; }
     UserInfo get_user_info() const { return current_user; }
     std::string get_last_error() const { return last_error_; }
+    long get_last_http_status() const { return last_http_status_; }
 
     // API 请求
     // 返回 pair: <login_url, device_code>
@@ -44,7 +45,7 @@ public:
 
     // 数据同步
     // 返回: 错误信息，为空则成功
-    std::string upload_data(long today_sec, long month_sec);
+    std::string upload_data(long today_sec, long week_sec, long month_sec, long total_sec);
 
     // 记录上次同步时间
     void set_last_sync_time(time_t t);
@@ -64,13 +65,14 @@ private:
     UserInfo current_user;
     time_t last_sync_time = 0;
     std::string last_error_;
+    long last_http_status_ = 0;
 
     // 简易 JSON 值提取
     std::string extract_json_value(const std::string& json, const std::string& key);
     // 基础 Curl 请求
     std::string http_get(const std::string& url);
     std::string http_post(const std::string& url, const std::string& data);
-    std::string http_post_files(const std::string& url, const std::vector<std::string>& file_paths, long today, long month);
+    std::string http_post_files(const std::string& url, const std::vector<std::string>& file_paths, long today, long week, long month, long total);
 };
 
 #endif

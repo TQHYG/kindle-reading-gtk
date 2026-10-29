@@ -275,14 +275,18 @@ struct AsyncPollData {
     std::string token;
     std::string device_code;
     long today_seconds;
+    long week_seconds;
     long month_seconds;
+    long total_seconds;
 };
 
 struct AsyncSyncData {
     SyncDialogData *ddata;
     std::string error;
     long today_seconds;
+    long week_seconds;
     long month_seconds;
+    long total_seconds;
     GtkWidget *btn;
 };
 
@@ -301,7 +305,9 @@ struct AsyncUploadData {
     SyncDialogData *ddata;
     std::string error;
     long today_seconds;
+    long week_seconds;
     long month_seconds;
+    long total_seconds;
 };
 
 // ---- 异步回调：登录后自动上传 ----
@@ -329,7 +335,7 @@ static gboolean auto_upload_done_idle(gpointer data) {
 static gpointer auto_upload_thread(gpointer data) {
     AsyncUploadData *ud = (AsyncUploadData *)data;
     KykkyNetwork &net = KykkyNetwork::instance();
-    ud->error = net.upload_data(ud->today_seconds, ud->month_seconds);
+    ud->error = net.upload_data(ud->today_seconds, ud->week_seconds, ud->month_seconds, ud->total_seconds);
     g_idle_add(auto_upload_done_idle, ud);
     return NULL;
 }
@@ -359,9 +365,20 @@ static gboolean poll_login_done_idle(gpointer data) {
             AsyncUploadData *ud = new AsyncUploadData();
             ud->ddata = ddata;
             ud->today_seconds = pd->today_seconds;
+            ud->week_seconds = pd->week_seconds;
             ud->month_seconds = pd->month_seconds;
+            ud->total_seconds = pd->total_seconds;
             ddata->ref();
             spawn_detached_thread(auto_upload_thread, ud);
+        } else {
+            KykkyNetwork &net = KykkyNetwork::instance();
+            if (!net.get_last_error().empty()) {
+                std::string msg = "  登录状态查询失败，正在重试: " + net.get_last_error() + "  ";
+                gtk_label_set_text(GTK_LABEL(ddata->lbl_status), msg.c_str());
+            } else {
+                gtk_label_set_text(GTK_LABEL(ddata->lbl_status),
+                    "    请使用手机浏览器扫描    ");
+            }
         }
     }
 
@@ -395,7 +412,9 @@ static gboolean on_poll_login(gpointer user_data) {
     pd->ddata = ddata;
     pd->device_code = ddata->pending_device_code;
     pd->today_seconds = g_stats.today_seconds;
+    pd->week_seconds = g_stats.week_seconds;
     pd->month_seconds = g_stats.month_seconds;
+    pd->total_seconds = g_stats.total_seconds;
 
     spawn_detached_thread(poll_login_thread, pd);
     return TRUE;
@@ -433,6 +452,16 @@ static gboolean do_sync_done_idle(gpointer data) {
         } else if (sd->error == "device_expired") {
             gtk_label_set_text(GTK_LABEL(ddata->lbl_status),
                 "  设备授权已过期，请重新登录  ");
+        } else if (sd->error == "not_logged_in") {
+            gtk_label_set_text(GTK_LABEL(ddata->lbl_status),
+                "  尚未登录，请重新扫码登录  ");
+        } else if (sd->error == "device_not_bound") {
+            gtk_label_set_text(GTK_LABEL(ddata->lbl_status),
+                "  设备尚未完成绑定，请重新扫码  ");
+        } else if (sd->error.rfind("Network Error", 0) == 0 ||
+                   sd->error.rfind("网络请求失败", 0) == 0) {
+            std::string msg = "  网络异常，请检查连接后重试\n  " + sd->error + "  ";
+            gtk_label_set_text(GTK_LABEL(ddata->lbl_status), msg.c_str());
         } else {
             std::string msg = "  同步失败: " + sd->error + "  ";
             gtk_label_set_text(GTK_LABEL(ddata->lbl_status), msg.c_str());
@@ -471,7 +500,7 @@ static gpointer do_sync_thread(gpointer data) {
         }
     }
 
-    sd->error = net.upload_data(sd->today_seconds, sd->month_seconds);
+    sd->error = net.upload_data(sd->today_seconds, sd->week_seconds, sd->month_seconds, sd->total_seconds);
     g_idle_add(do_sync_done_idle, sd);
     return NULL;
 }
@@ -489,7 +518,9 @@ static void on_do_sync(GtkButton *btn, gpointer user_data) {
     AsyncSyncData *sd = new AsyncSyncData();
     sd->ddata = ddata;
     sd->today_seconds = g_stats.today_seconds;
+    sd->week_seconds = g_stats.week_seconds;
     sd->month_seconds = g_stats.month_seconds;
+    sd->total_seconds = g_stats.total_seconds;
     sd->btn = GTK_WIDGET(btn);
 
     spawn_detached_thread(do_sync_thread, sd);
@@ -615,8 +646,10 @@ static gboolean check_net_done_idle(gpointer data) {
         gtk_box_pack_start(GTK_BOX(ddata->offline_container), lbl_offline, FALSE, FALSE, 5);
 
         std::string json_data = "{\"did\":\"" + net.get_device_code() + "\",\"today\":"
-                            + std::to_string(g_stats.today_seconds) + ",\"month\":"
-                            + std::to_string(g_stats.month_seconds) + "}";
+                            + std::to_string(g_stats.today_seconds) + ",\"week\":"
+                            + std::to_string(g_stats.week_seconds) + ",\"month\":"
+                            + std::to_string(g_stats.month_seconds) + ",\"total\":"
+                            + std::to_string(g_stats.total_seconds) + "}";
 
         std::string b64 = base64_encode(json_data);
         std::string fast_url = share_base_url() + "/fastsync.html?data=" + b64;
