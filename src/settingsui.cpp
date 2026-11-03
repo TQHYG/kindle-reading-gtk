@@ -984,10 +984,10 @@ static GtkWidget* create_rank_type_button(const char *text, const char *type)
 
     GtkWidget *eventbox = gtk_event_box_new();
     gtk_event_box_set_visible_window(GTK_EVENT_BOX(eventbox), TRUE);
-    gtk_widget_set_size_request(eventbox, 92, 48);
+    gtk_widget_set_size_request(eventbox, 100, 50);
 
     GtkWidget *label = gtk_label_new(text);
-    set_font(label, "Sans Bold 13");
+    set_font(label, "Sans Bold 10");
     gtk_misc_set_alignment(GTK_MISC(label), 0.5f, 0.5f);
     gtk_container_add(GTK_CONTAINER(eventbox), label);
     gtk_container_add(GTK_CONTAINER(frame), eventbox);
