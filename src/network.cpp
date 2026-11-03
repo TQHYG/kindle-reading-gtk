@@ -12,6 +12,7 @@
 #include <cstring>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <algorithm>
 
 #define MY_USER_AGENT "Mozilla/5.0 (Linux; Android 4.4.2; Kindle Fire Build/KOT49H) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/30.0.0.0 Safari/537.36"
@@ -80,6 +81,75 @@ void KykkyNetwork::load_state() {
             else if (key == "devicename") current_user.device_name = val;
         }
     }
+}
+
+RankData KykkyNetwork::fetch_rank(const std::string& type, int limit) {
+    RankData result;
+    result.ok = false;
+    result.type = (type == "week" || type == "month" || type == "total") ? type : "today";
+    result.has_more = false;
+    result.my_rank = 0;
+    result.my_seconds = 0;
+
+    if (limit < 1) limit = 1;
+    if (limit > 50) limit = 50;
+
+    std::string url = baseUrl() + "/api/rank.php?format=text&type=" + result.type
+        + "&limit=" + std::to_string(limit);
+    std::string raw = http_get(url);
+    if (raw.empty()) {
+        result.error = last_error_.empty() ? "服务器无响应" : last_error_;
+        return result;
+    }
+
+    std::istringstream stream(raw);
+    std::string line;
+    bool ended = false;
+    while (std::getline(stream, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+
+        std::vector<std::string> fields;
+        size_t start = 0;
+        while (true) {
+            size_t tab = line.find('\t', start);
+            if (tab == std::string::npos) {
+                fields.push_back(line.substr(start));
+                break;
+            }
+            fields.push_back(line.substr(start, tab - start));
+            start = tab + 1;
+        }
+        if (fields.empty()) continue;
+
+        if (fields[0] == "OK") {
+            continue;
+        } else if (fields[0] == "TYPE" && fields.size() >= 2) {
+            result.type = fields[1];
+        } else if (fields[0] == "HAS_MORE" && fields.size() >= 2) {
+            result.has_more = fields[1] == "1";
+        } else if (fields[0] == "MY_RANK" && fields.size() >= 2) {
+            result.my_rank = std::atoi(fields[1].c_str());
+        } else if (fields[0] == "MY_SECONDS" && fields.size() >= 2) {
+            result.my_seconds = std::atol(fields[1].c_str());
+        } else if (fields[0] == "ENTRY" && fields.size() >= 4) {
+            RankEntry entry;
+            entry.rank = std::atoi(fields[1].c_str());
+            entry.nickname = fields[2];
+            entry.seconds = std::atol(fields[3].c_str());
+            if (entry.rank > 0) {
+                result.entries.push_back(entry);
+            }
+        } else if (fields[0] == "END") {
+            ended = true;
+        }
+    }
+
+    if (!ended) {
+        result.error = last_error_.empty() ? "排行榜数据格式异常" : last_error_;
+        return result;
+    }
+    result.ok = true;
+    return result;
 }
 
 // --- 实现 set_last_sync_time ---
@@ -586,7 +656,8 @@ std::string KykkyNetwork::upload_data(long today, long week, long month, long to
     if (resp.find("expired") != std::string::npos) {
         std::cout << "[Network] Device expired, skipping upload and clearing local auth." << std::endl;
         clear_local_auth(); // 清除本地 state 和 token
-        refresh_all_status_labels(); // 刷新 UI 小字
+        // 注意：本函数可能运行在网络线程，不能直接操作 GTK。
+        // UI 刷新由调用方的 idle 回调负责。
         return "device_expired";
     }
 

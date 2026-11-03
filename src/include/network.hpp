@@ -12,6 +12,22 @@ struct UserInfo {
     bool is_logged_in;
 };
 
+struct RankEntry {
+    int rank;
+    std::string nickname;
+    long seconds;
+};
+
+struct RankData {
+    bool ok;
+    std::string type;
+    bool has_more;
+    int my_rank;
+    long my_seconds;
+    std::vector<RankEntry> entries;
+    std::string error;
+};
+
 class KykkyNetwork {
 public:
     static KykkyNetwork& instance();
@@ -46,6 +62,9 @@ public:
     // 数据同步
     // 返回: 错误信息，为空则成功
     std::string upload_data(long today_sec, long week_sec, long month_sec, long total_sec);
+
+    // 排行榜（服务端返回轻量文本协议）
+    RankData fetch_rank(const std::string& type, int limit = 50);
 
     // 记录上次同步时间
     void set_last_sync_time(time_t t);
