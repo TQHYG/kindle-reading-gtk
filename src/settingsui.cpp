@@ -127,16 +127,66 @@ static std::string get_button_text(GtkWidget *button)
     return label != NULL ? label : "";
 }
 
-static void set_info_text(GtkWidget *label, const std::string& text, bool error)
+static void set_info_text(GtkWidget *widget, const std::string& text, bool error)
 {
-    if (label == NULL) return;
-    gtk_label_set_text(GTK_LABEL(label), text.c_str());
-    if (error) {
-        GdkColor red = {0, 0xcc00, 0x0000, 0x0000};
-        gtk_widget_modify_fg(label, GTK_STATE_NORMAL, &red);
-    } else {
-        gtk_widget_modify_fg(label, GTK_STATE_NORMAL, NULL);
+    if (widget == NULL) return;
+
+    GdkColor red = {0, 0xcc00, 0x0000, 0x0000};
+    if (GTK_IS_TEXT_VIEW(widget)) {
+        GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(widget));
+        gtk_text_buffer_set_text(buffer, text.c_str(), -1);
+        gtk_widget_modify_text(widget, GTK_STATE_NORMAL, error ? &red : NULL);
+        GtkTextIter start;
+        gtk_text_buffer_get_start_iter(buffer, &start);
+        gtk_text_buffer_place_cursor(buffer, &start);
+        gtk_text_view_scroll_to_iter(GTK_TEXT_VIEW(widget), &start, 0.0, TRUE, 0.0, 0.0);
+        return;
     }
+
+    if (!GTK_IS_LABEL(widget)) return;
+    gtk_label_set_text(GTK_LABEL(widget), text.c_str());
+    if (error) {
+        gtk_widget_modify_fg(widget, GTK_STATE_NORMAL, &red);
+    } else {
+        gtk_widget_modify_fg(widget, GTK_STATE_NORMAL, NULL);
+    }
+}
+
+static GtkWidget* create_status_box(GtkWidget **widget_out, int lines, const char *initial_text)
+{
+    if (lines < 1) lines = 1;
+
+    GtkWidget *frame = gtk_frame_new(NULL);
+    gtk_frame_set_shadow_type(GTK_FRAME(frame), GTK_SHADOW_NONE);
+    gtk_container_set_border_width(GTK_CONTAINER(frame), 6);
+
+    GtkWidget *view = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(view), FALSE);
+    gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(view), FALSE);
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(view), GTK_WRAP_WORD_CHAR);
+    gtk_text_view_set_left_margin(GTK_TEXT_VIEW(view), 0);
+    gtk_text_view_set_right_margin(GTK_TEXT_VIEW(view), 0);
+    gtk_widget_modify_base(view, GTK_STATE_NORMAL, &white);
+    gtk_widget_modify_bg(view, GTK_STATE_NORMAL, &white);
+    set_font(view, "Sans 11");
+
+    // 不滚动：按实际字体行高留出指定行数，额外加少量内边距。
+    PangoContext *context = gtk_widget_get_pango_context(view);
+    PangoFontDescription *font_desc = pango_font_description_from_string("Sans 11");
+    PangoFontMetrics *metrics = pango_context_get_metrics(context, font_desc, NULL);
+    int line_height = PANGO_PIXELS(pango_font_metrics_get_ascent(metrics) +
+                                   pango_font_metrics_get_descent(metrics));
+    pango_font_metrics_unref(metrics);
+    pango_font_description_free(font_desc);
+    if (line_height < 16) line_height = 16;
+    gtk_widget_set_size_request(view, -1, lines * line_height + 10);
+
+    GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(view));
+    gtk_text_buffer_set_text(buffer, initial_text != NULL ? initial_text : "", -1);
+
+    gtk_container_add(GTK_CONTAINER(frame), view);
+    *widget_out = view;
+    return frame;
 }
 
 // ---------------------------------------------------------------------------
@@ -697,13 +747,8 @@ static GtkWidget* create_user_center_page()
     gtk_misc_set_alignment(GTK_MISC(info_title), 0.0f, 0.5f);
     gtk_box_pack_start(GTK_BOX(vbox), info_title, FALSE, FALSE, 2);
 
-    g_user_center->lbl_info = gtk_label_new("就绪");
-    gtk_label_set_line_wrap(GTK_LABEL(g_user_center->lbl_info), TRUE);
-    gtk_label_set_justify(GTK_LABEL(g_user_center->lbl_info), GTK_JUSTIFY_LEFT);
-    gtk_misc_set_alignment(GTK_MISC(g_user_center->lbl_info), 0.0f, 0.0f);
-    gtk_widget_set_size_request(g_user_center->lbl_info, -1, 64);
-    set_font(g_user_center->lbl_info, "Sans 11");
-    gtk_box_pack_start(GTK_BOX(vbox), g_user_center->lbl_info, FALSE, FALSE, 0);
+    GtkWidget *info_box = create_status_box(&g_user_center->lbl_info, 3, "就绪");
+    gtk_box_pack_start(GTK_BOX(vbox), info_box, FALSE, FALSE, 0);
 
     g_signal_connect(G_OBJECT(g_user_center->btn_auth), "clicked",
                      G_CALLBACK(on_user_auth_clicked), NULL);
@@ -1168,7 +1213,8 @@ static GtkWidget* create_app_settings_page()
     GtkWidget *eventbox = create_white_eventbox();
 
     GtkWidget *vbox = gtk_vbox_new(FALSE, 16);
-    GtkWidget *align_box = gtk_alignment_new(0.5f, 0.05f, 0.82f, 0.0f);
+    gtk_container_set_border_width(GTK_CONTAINER(vbox), 20);
+    GtkWidget *align_box = gtk_alignment_new(0.5f, 0.05f, 1.0f, 0.0f);
     gtk_container_add(GTK_CONTAINER(eventbox), align_box);
     gtk_container_add(GTK_CONTAINER(align_box), vbox);
 
@@ -1261,13 +1307,8 @@ static GtkWidget* create_app_settings_page()
     gtk_misc_set_alignment(GTK_MISC(info_title), 0.0f, 0.5f);
     gtk_box_pack_start(GTK_BOX(vbox), info_title, FALSE, FALSE, 10);
 
-    g_settings_info = gtk_label_new("设置修改会立即生效");
-    gtk_label_set_line_wrap(GTK_LABEL(g_settings_info), TRUE);
-    gtk_label_set_justify(GTK_LABEL(g_settings_info), GTK_JUSTIFY_LEFT);
-    gtk_misc_set_alignment(GTK_MISC(g_settings_info), 0.0f, 0.0f);
-    gtk_widget_set_size_request(g_settings_info, -1, 56);
-    set_font(g_settings_info, "Sans 11");
-    gtk_box_pack_start(GTK_BOX(vbox), g_settings_info, FALSE, FALSE, 0);
+    GtkWidget *settings_info_box = create_status_box(&g_settings_info, 3, "设置修改会立即生效");
+    gtk_box_pack_start(GTK_BOX(vbox), settings_info_box, FALSE, FALSE, 0);
 
     return eventbox;
 }
