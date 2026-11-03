@@ -38,6 +38,26 @@ static void clear_box(GtkWidget *box)
     g_list_free(children);
 }
 
+static GtkWidget* create_white_eventbox()
+{
+    GtkWidget *eventbox = gtk_event_box_new();
+    gtk_event_box_set_visible_window(GTK_EVENT_BOX(eventbox), TRUE);
+    gtk_widget_modify_bg(eventbox, GTK_STATE_NORMAL, &white);
+    gtk_widget_modify_base(eventbox, GTK_STATE_NORMAL, &white);
+    return eventbox;
+}
+
+static void whiten_scrolled_content(GtkWidget *scroll, GtkWidget *content)
+{
+    gtk_widget_modify_bg(scroll, GTK_STATE_NORMAL, &white);
+    gtk_widget_modify_base(scroll, GTK_STATE_NORMAL, &white);
+    GtkWidget *viewport = gtk_widget_get_parent(content);
+    if (viewport != NULL) {
+        gtk_widget_modify_bg(viewport, GTK_STATE_NORMAL, &white);
+        gtk_widget_modify_base(viewport, GTK_STATE_NORMAL, &white);
+    }
+}
+
 static std::string format_seconds_text(long seconds)
 {
     if (seconds <= 0) return "0 分钟";
@@ -68,10 +88,11 @@ static GtkWidget* make_info_row(const char *title, GtkWidget **value_label)
 
     GtkWidget *label = gtk_label_new(title);
     set_font(label, "Sans Bold 13");
-    gtk_widget_set_size_request(label, 130, -1);
     gtk_misc_set_alignment(GTK_MISC(label), 0.0f, 0.5f);
 
     GtkWidget *value = make_value_label("-", "Sans 13");
+    gtk_misc_set_alignment(GTK_MISC(value), 1.0f, 0.5f);
+    gtk_label_set_ellipsize(GTK_LABEL(value), PANGO_ELLIPSIZE_END);
     gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(hbox), value, TRUE, TRUE, 0);
     *value_label = value;
@@ -621,16 +642,17 @@ static GtkWidget* create_user_center_page()
 {
     g_user_center = new UserCenterWidgets();
 
-    GtkWidget *eventbox = gtk_event_box_new();
-    gtk_widget_modify_bg(eventbox, GTK_STATE_NORMAL, &white);
+    GtkWidget *eventbox = create_white_eventbox();
 
     GtkWidget *scroll = gtk_scrolled_window_new(NULL, NULL);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(scroll), GTK_SHADOW_NONE);
     gtk_container_add(GTK_CONTAINER(eventbox), scroll);
 
     GtkWidget *vbox = gtk_vbox_new(FALSE, 12);
     gtk_container_set_border_width(GTK_CONTAINER(vbox), 20);
     gtk_scrolled_window_add_with_viewport(GTK_SCROLLED_WINDOW(scroll), vbox);
+    whiten_scrolled_content(scroll, vbox);
 
     GtkWidget *title = gtk_label_new("用户中心");
     set_font(title, "Sans Bold 18");
@@ -670,7 +692,7 @@ static GtkWidget* create_user_center_page()
     gtk_widget_set_no_show_all(g_user_center->qr_container, TRUE);
     gtk_widget_hide(g_user_center->qr_container);
 
-    GtkWidget *info_title = gtk_label_new("状态 / 错误信息");
+    GtkWidget *info_title = gtk_label_new("信息");
     set_font(info_title, "Sans Bold 11");
     gtk_misc_set_alignment(GTK_MISC(info_title), 0.0f, 0.5f);
     gtk_box_pack_start(GTK_BOX(vbox), info_title, FALSE, FALSE, 2);
@@ -926,8 +948,7 @@ static GtkWidget* create_rank_page()
 {
     g_rank = new RankWidgets();
 
-    GtkWidget *eventbox = gtk_event_box_new();
-    gtk_widget_modify_bg(eventbox, GTK_STATE_NORMAL, &white);
+    GtkWidget *eventbox = create_white_eventbox();
     g_rank_page = eventbox;
     g_object_set_data(G_OBJECT(g_rank_page), "rank_loaded", GINT_TO_POINTER(0));
 
@@ -984,11 +1005,13 @@ static GtkWidget* create_rank_page()
     g_rank->scroll = gtk_scrolled_window_new(NULL, NULL);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(g_rank->scroll),
                                    GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(g_rank->scroll), GTK_SHADOW_NONE);
     gtk_widget_modify_bg(g_rank->scroll, GTK_STATE_NORMAL, &white);
 
     g_rank->body = gtk_vbox_new(FALSE, 2);
     gtk_container_set_border_width(GTK_CONTAINER(g_rank->body), 14);
     gtk_scrolled_window_add_with_viewport(GTK_SCROLLED_WINDOW(g_rank->scroll), g_rank->body);
+    whiten_scrolled_content(g_rank->scroll, g_rank->body);
     gtk_box_pack_start(GTK_BOX(vbox), g_rank->scroll, TRUE, TRUE, 0);
     gtk_widget_set_no_show_all(g_rank->scroll, TRUE);
     gtk_widget_hide(g_rank->scroll);
@@ -1099,8 +1122,7 @@ void on_target_change(GtkButton *btn, gpointer data)
 
 static GtkWidget* create_app_settings_page()
 {
-    GtkWidget *eventbox = gtk_event_box_new();
-    gtk_widget_modify_bg(eventbox, GTK_STATE_NORMAL, &white);
+    GtkWidget *eventbox = create_white_eventbox();
 
     GtkWidget *vbox = gtk_vbox_new(FALSE, 16);
     GtkWidget *align_box = gtk_alignment_new(0.5f, 0.05f, 0.82f, 0.0f);
@@ -1191,7 +1213,7 @@ static GtkWidget* create_app_settings_page()
     gtk_box_pack_start(GTK_BOX(vbox), hbox_clear, FALSE, FALSE, 0);
 
     // 设置页状态
-    GtkWidget *info_title = gtk_label_new("状态 / 提示信息");
+    GtkWidget *info_title = gtk_label_new("信息");
     set_font(info_title, "Sans Bold 11");
     gtk_misc_set_alignment(GTK_MISC(info_title), 0.0f, 0.5f);
     gtk_box_pack_start(GTK_BOX(vbox), info_title, FALSE, FALSE, 10);
@@ -1211,11 +1233,29 @@ static GtkWidget* create_app_settings_page()
 // 更多页签
 // ---------------------------------------------------------------------------
 
+static void update_sub_tab_colors(GtkNotebook *notebook, guint active_page)
+{
+    GdkColor black = {0, 0x0000, 0x0000, 0x0000};
+    int pages = gtk_notebook_get_n_pages(notebook);
+    for (int i = 0; i < pages; i++) {
+        GtkWidget *child = gtk_notebook_get_nth_page(notebook, i);
+        if (child == NULL) continue;
+        GtkWidget *tab = gtk_notebook_get_tab_label(notebook, child);
+        if (tab == NULL) continue;
+        GdkColor *color = ((guint)i == active_page) ? &black : &white;
+        gtk_widget_modify_fg(tab, GTK_STATE_NORMAL, color);
+        gtk_widget_modify_fg(tab, GTK_STATE_ACTIVE, color);
+        gtk_widget_modify_fg(tab, GTK_STATE_PRELIGHT, color);
+        gtk_widget_modify_fg(tab, GTK_STATE_SELECTED, color);
+    }
+}
+
 static void on_more_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer data)
 {
-    (void)notebook;
     (void)page;
     (void)data;
+
+    update_sub_tab_colors(notebook, page_num);
 
     if (page_num == 0) {
         user_center_refresh();
@@ -1238,7 +1278,7 @@ GtkWidget* create_settings_page()
     gtk_notebook_set_tab_pos(GTK_NOTEBOOK(notebook), GTK_POS_TOP);
     gtk_widget_modify_bg(notebook, GTK_STATE_NORMAL, &white);
 
-    PangoFontDescription *tab_font = pango_font_description_from_string("Sans Bold 13");
+    PangoFontDescription *tab_font = pango_font_description_from_string("Sans Bold 15");
 
     GtkWidget *tab_user = gtk_label_new("用户中心");
     GtkWidget *tab_rank = gtk_label_new("排行榜");
@@ -1251,6 +1291,7 @@ GtkWidget* create_settings_page()
     gtk_notebook_append_page(GTK_NOTEBOOK(notebook), create_rank_page(), tab_rank);
     gtk_notebook_append_page(GTK_NOTEBOOK(notebook), create_app_settings_page(), tab_settings);
     gtk_notebook_set_current_page(GTK_NOTEBOOK(notebook), 0);
+    update_sub_tab_colors(GTK_NOTEBOOK(notebook), 0);
 
     pango_font_description_free(tab_font);
 
