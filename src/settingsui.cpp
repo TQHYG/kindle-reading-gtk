@@ -626,7 +626,7 @@ static void on_user_fast_clicked(GtkButton *btn, gpointer data)
         + std::to_string(g_stats.total_seconds) + "}";
     std::string url = share_base_url() + "/fastsync.html?data=" + base64_encode(json);
     user_center_show_qr(url, 6);
-    user_center_set_info("快捷同步二维码已生成，可用手机扫码同步");
+    user_center_set_info("同步二维码已生成");
 }
 
 static void on_user_share_clicked(GtkButton *btn, gpointer data)
@@ -635,7 +635,7 @@ static void on_user_share_clicked(GtkButton *btn, gpointer data)
     (void)data;
     std::string url = generate_share_url();
     user_center_show_qr(url, 5);
-    user_center_set_info("本月分享二维码已生成，可用手机扫码查看");
+    user_center_set_info("分享二维码已生成");
 }
 
 static GtkWidget* create_user_center_page()
@@ -922,18 +922,51 @@ static void rank_refresh_async()
     pthread_attr_destroy(&attr);
 }
 
-static void on_rank_type_clicked(GtkButton *btn, gpointer data)
+static void rank_update_type_button_styles()
+{
+    if (g_rank == NULL) return;
+
+    GdkColor black = {0, 0x0000, 0x0000, 0x0000};
+    for (int i = 0; i < 4; i++) {
+        GtkWidget *frame = g_rank->type_buttons[i];
+        if (frame == NULL) continue;
+
+        const char *type = static_cast<const char *>(g_object_get_data(G_OBJECT(frame), "rank_type"));
+        bool active = type != NULL && g_rank->type == type;
+        GdkColor *bg = active ? &black : &white;
+        GdkColor *fg = active ? &white : &black;
+
+        GtkWidget *eventbox = gtk_bin_get_child(GTK_BIN(frame));
+        if (eventbox != NULL) {
+            gtk_widget_modify_bg(eventbox, GTK_STATE_NORMAL, bg);
+            GtkWidget *label = gtk_bin_get_child(GTK_BIN(eventbox));
+            if (label != NULL && GTK_IS_LABEL(label)) {
+                gtk_widget_modify_fg(label, GTK_STATE_NORMAL, fg);
+            }
+        }
+    }
+}
+
+static gboolean on_rank_type_clicked(GtkWidget *widget, GdkEventButton *event, gpointer data)
 {
     (void)data;
-    if (!gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(btn))) return;
-    const char *type = static_cast<const char *>(g_object_get_data(G_OBJECT(btn), "rank_type"));
-    if (type == NULL || g_rank == NULL) return;
-    if (g_rank->type == type && g_object_get_data(G_OBJECT(g_rank_page), "rank_loaded") != NULL) {
-        return;
+    if (event == NULL || event->type != GDK_BUTTON_PRESS || event->button != 1) {
+        return FALSE;
     }
+    if (g_rank == NULL) return FALSE;
+
+    const char *type = static_cast<const char *>(g_object_get_data(G_OBJECT(widget), "rank_type"));
+    if (type == NULL) return FALSE;
+
+    bool same_type = (g_rank->type == type);
     g_rank->type = type;
-    g_object_set_data(G_OBJECT(g_rank_page), "rank_loaded", GINT_TO_POINTER(0));
-    rank_refresh_async();
+    rank_update_type_button_styles();
+
+    if (!same_type || g_object_get_data(G_OBJECT(g_rank_page), "rank_loaded") == NULL) {
+        g_object_set_data(G_OBJECT(g_rank_page), "rank_loaded", GINT_TO_POINTER(0));
+        rank_refresh_async();
+    }
+    return TRUE;
 }
 
 static void on_rank_refresh_clicked(GtkButton *btn, gpointer data)
@@ -942,6 +975,29 @@ static void on_rank_refresh_clicked(GtkButton *btn, gpointer data)
     (void)data;
     g_object_set_data(G_OBJECT(g_rank_page), "rank_loaded", GINT_TO_POINTER(0));
     rank_refresh_async();
+}
+
+static GtkWidget* create_rank_type_button(const char *text, const char *type)
+{
+    GtkWidget *frame = gtk_frame_new(NULL);
+    gtk_frame_set_shadow_type(GTK_FRAME(frame), GTK_SHADOW_OUT);
+
+    GtkWidget *eventbox = gtk_event_box_new();
+    gtk_event_box_set_visible_window(GTK_EVENT_BOX(eventbox), TRUE);
+    gtk_widget_set_size_request(eventbox, 92, 48);
+
+    GtkWidget *label = gtk_label_new(text);
+    set_font(label, "Sans Bold 13");
+    gtk_misc_set_alignment(GTK_MISC(label), 0.5f, 0.5f);
+    gtk_container_add(GTK_CONTAINER(eventbox), label);
+    gtk_container_add(GTK_CONTAINER(frame), eventbox);
+
+    g_object_set_data(G_OBJECT(eventbox), "rank_type", (gpointer)type);
+    g_object_set_data(G_OBJECT(frame), "rank_type", (gpointer)type);
+    gtk_widget_add_events(eventbox, GDK_BUTTON_PRESS_MASK);
+    g_signal_connect(G_OBJECT(eventbox), "button-press-event",
+                     G_CALLBACK(on_rank_type_clicked), NULL);
+    return frame;
 }
 
 static GtkWidget* create_rank_page()
@@ -960,25 +1016,11 @@ static GtkWidget* create_rank_page()
     gtk_box_pack_start(GTK_BOX(vbox), header, FALSE, FALSE, 0);
 
     GtkWidget *left = gtk_hbox_new(FALSE, 6);
-    GtkWidget *first = gtk_radio_button_new_with_label(NULL, "日榜");
-    gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(first), FALSE);
-    g_object_set_data(G_OBJECT(first), "rank_type", (gpointer)"today");
-    gtk_widget_set_size_request(first, 92, 48);
 
-    GtkWidget *week = gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(first), "周榜");
-    gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(week), FALSE);
-    g_object_set_data(G_OBJECT(week), "rank_type", (gpointer)"week");
-    gtk_widget_set_size_request(week, 92, 48);
-
-    GtkWidget *month = gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(first), "月榜");
-    gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(month), FALSE);
-    g_object_set_data(G_OBJECT(month), "rank_type", (gpointer)"month");
-    gtk_widget_set_size_request(month, 92, 48);
-
-    GtkWidget *total = gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(first), "总榜");
-    gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(total), FALSE);
-    g_object_set_data(G_OBJECT(total), "rank_type", (gpointer)"total");
-    gtk_widget_set_size_request(total, 92, 48);
+    GtkWidget *first = create_rank_type_button("日榜", "today");
+    GtkWidget *week = create_rank_type_button("周榜", "week");
+    GtkWidget *month = create_rank_type_button("月榜", "month");
+    GtkWidget *total = create_rank_type_button("总榜", "total");
 
     g_rank->type_buttons[0] = first;
     g_rank->type_buttons[1] = week;
@@ -988,9 +1030,10 @@ static GtkWidget* create_rank_page()
     GtkWidget *types[] = {first, week, month, total};
     for (int i = 0; i < 4; i++) {
         gtk_box_pack_start(GTK_BOX(left), types[i], FALSE, FALSE, 0);
-        g_signal_connect(G_OBJECT(types[i]), "clicked", G_CALLBACK(on_rank_type_clicked), NULL);
+        gtk_widget_show_all(types[i]);
     }
     gtk_box_pack_start(GTK_BOX(header), left, FALSE, FALSE, 0);
+    rank_update_type_button_styles();
 
     g_rank->btn_refresh = gtk_button_new_with_label("刷新");
     gtk_widget_set_size_request(g_rank->btn_refresh, 96, 48);
